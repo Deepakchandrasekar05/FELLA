@@ -1,10 +1,30 @@
 <p align="center">
-  <img src="https://capsule-render.vercel.app/api?type=waving&color=0:0d1117,50:0d2540,100:0d3060&height=200&section=header&text=FELLA&fontSize=96&fontColor=bbe2fd&fontAlignY=42&desc=File%20Exploration%20and%20Local%20Logic%20Automation&descAlignY=65&descSize=17&descColor=a0cafd" width="100%"/>
-</p>
-
-<p align="center">
-  <b>File Exploration and Local Logic Automation</b><br/>
-  An AI-powered terminal assistant — talk to your file system in plain English.
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 200" width="780" height="200">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%"   stop-color="#bbe2fd"/>
+      <stop offset="20%"  stop-color="#a9d7fc"/>
+      <stop offset="40%"  stop-color="#a0cafd"/>
+      <stop offset="60%"  stop-color="#66b9fd"/>
+      <stop offset="80%"  stop-color="#49b9ff"/>
+      <stop offset="100%" stop-color="#44a8fb"/>
+    </linearGradient>
+  </defs>
+  <rect width="780" height="200" rx="12" fill="#0d1117"/>
+  <text x="390" text-anchor="middle" xml:space="preserve"
+        font-family="'Noto Sans Mono','DejaVu Sans Mono','Liberation Mono',monospace" font-size="15" font-weight="bold" fill="url(#g)">
+    <tspan x="390" y="40">███████╗ ███████╗ ██╗      ██╗       █████╗ </tspan>
+    <tspan x="390" y="61">██╔════╝ ██╔════╝ ██║      ██║      ██╔══██╗</tspan>
+    <tspan x="390" y="82">█████╗   █████╗   ██║      ██║      ███████║</tspan>
+    <tspan x="390" y="103">██╔══╝   ██╔══╝   ██║      ██║      ██╔══██║</tspan>
+    <tspan x="390" y="124">██║      ███████╗ ███████╗ ███████╗ ██║  ██║</tspan>
+    <tspan x="390" y="145">╚═╝      ╚══════╝ ╚══════╝ ╚══════╝ ╚═╝  ╚═╝</tspan>
+  </text>
+  <text x="390" y="172" text-anchor="middle"
+        font-family="'Noto Sans Mono','DejaVu Sans Mono',monospace" font-size="13" fill="#a0cafd">◆ File Exploration and Local Logic Automation ◆</text>
+  <text x="390" y="190" text-anchor="middle"
+        font-family="'Noto Sans Mono','DejaVu Sans Mono',monospace" font-size="11" fill="#66b9fd">An Agentic CLI for Windows</text>
+</svg>
 </p>
 
 <p align="center">
