@@ -1,5 +1,5 @@
 .env
-assets/
+assets/*.png.bak
 bin/
 scripts/
 src/
