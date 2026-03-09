@@ -1,26 +1,5 @@
 <p align="center">
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 172" width="780" height="172">
-  <defs>
-    <linearGradient id="g" x1="0" y1="28" x2="0" y2="152" gradientUnits="userSpaceOnUse">
-      <stop offset="0%"   stop-color="#bbe2fd"/>
-      <stop offset="20%"  stop-color="#a9d7fc"/>
-      <stop offset="40%"  stop-color="#a0cafd"/>
-      <stop offset="60%"  stop-color="#66b9fd"/>
-      <stop offset="80%"  stop-color="#49b9ff"/>
-      <stop offset="100%" stop-color="#44a8fb"/>
-    </linearGradient>
-  </defs>
-  <rect width="780" height="172" rx="12" fill="#0d1117"/>
-  <text x="390" text-anchor="middle" xml:space="preserve"
-        font-family="'Courier New',Courier,monospace" font-size="15" font-weight="bold" fill="url(#g)">
-    <tspan x="390" y="42">███████╗ ███████╗ ██╗      ██╗       █████╗ </tspan>
-    <tspan x="390" y="63">██╔════╝ ██╔════╝ ██║      ██║      ██╔══██╗</tspan>
-    <tspan x="390" y="84">█████╗   █████╗   ██║      ██║      ███████║</tspan>
-    <tspan x="390" y="105">██╔══╝   ██╔══╝   ██║      ██║      ██╔══██║</tspan>
-    <tspan x="390" y="126">██║      ███████╗ ███████╗ ███████╗ ██║  ██║</tspan>
-    <tspan x="382" y="145">╚═╝      ╚══════╝ ╚══════╝ ╚══════╝ ╚═╝  ╚═╝</tspan>
-  </text>
-</svg>
+  <img src="https://capsule-render.vercel.app/api?type=waving&color=0:0d1117,50:0d2540,100:0d3060&height=200&section=header&text=FELLA&fontSize=96&fontColor=bbe2fd&fontAlignY=42&desc=File%20Exploration%20and%20Local%20Logic%20Automation&descAlignY=65&descSize=17&descColor=a0cafd" width="100%"/>
 </p>
 
 <p align="center">
@@ -33,7 +12,6 @@
   <img src="https://img.shields.io/badge/version-1.0.0-49b9ff?style=flat-square"/>
   <img src="https://img.shields.io/badge/TypeScript-5.9-3178c6?style=flat-square&logo=typescript&logoColor=white"/>
   <img src="https://img.shields.io/badge/Node.js-18%2B-339933?style=flat-square&logo=node.js&logoColor=white"/>
-  <img src="https://img.shields.io/badge/React-19-61dafb?style=flat-square&logo=react&logoColor=black"/>
 </p>
 
 ---
