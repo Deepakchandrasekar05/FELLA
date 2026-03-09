@@ -4,7 +4,7 @@
 
 <p align="center">
   <b>◆ File Exploration and Local Logic Automation ◆</b><br/>
-  An AI-powered agentic CLI for Windows — talk to your file system in plain English.
+  An Agentic CLI for Windows - talk to your file system through prompts.
 </p>
 
 <p align="center">
