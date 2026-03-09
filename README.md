@@ -3,6 +3,11 @@
 </p>
 
 <p align="center">
+  <b>◆ File Exploration and Local Logic Automation ◆</b><br/>
+  An AI-powered agentic CLI for Windows — talk to your file system in plain English.
+</p>
+
+<p align="center">
   <img src="https://img.shields.io/badge/platform-Windows-blue?style=flat-square"/>
   <img src="https://img.shields.io/badge/version-1.0.0-49b9ff?style=flat-square"/>
   <img src="https://img.shields.io/badge/TypeScript-5.9-3178c6?style=flat-square&logo=typescript&logoColor=white"/>
