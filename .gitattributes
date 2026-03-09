@@ -1,0 +1,15 @@
+# Normalize all text files to LF in the repo
+* text=auto eol=lf
+
+# Explicitly LF
+*.ts    text eol=lf
+*.tsx   text eol=lf
+*.js    text eol=lf
+*.mjs   text eol=lf
+*.cjs   text eol=lf
+*.json  text eol=lf
+*.md    text eol=lf
+*.env   text eol=lf
+
+# Windows batch files must stay CRLF
+*.bat   text eol=crlf

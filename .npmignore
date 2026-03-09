@@ -1,0 +1,7 @@
+.env
+assets/
+bin/
+scripts/
+src/
+tsconfig.json
+sea-config.json

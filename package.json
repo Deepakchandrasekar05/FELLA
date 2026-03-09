@@ -1,0 +1,51 @@
+{
+  "name": "fella-cli",
+  "version": "1.0.0",
+  "description": "File Exploration and Local Logic Automation - An Agentic CLI",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "fella": "dist/index.js"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "bundle": "node scripts/bundle.mjs",
+    "postbundle": "node scripts/postbundle.mjs",
+    "build": "npm run typecheck && npm run bundle",
+    "predist": "node scripts/predist.mjs",
+    "sea": "npm run build && node scripts/sea.mjs",
+    "caxa:win": "npm run build && caxa --input dist --output bin/fella-win.exe -- \"{{caxa}}/node_modules/.bin/node\" \"{{caxa}}/index.js\"",
+    "caxa:linux": "npm run build && caxa --input dist --output bin/fella-linux -- \"{{caxa}}/node_modules/.bin/node\" \"{{caxa}}/index.js\"",
+    "caxa:mac": "npm run build && caxa --input dist --output bin/fella-macos -- \"{{caxa}}/node_modules/.bin/node\" \"{{caxa}}/index.js\"",
+    "dist": "taskkill /F /IM fella-win.exe 2>nul & npm run build && caxa --input dist --output bin/fella-win.exe -- node \"{{caxa}}/run.cjs\"",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@nut-tree-fork/nut-js": "^4.2.6",
+    "@supabase/supabase-js": "^2.98.0",
+    "better-sqlite3": "^12.6.2",
+    "chalk": "^5.6.2",
+    "dotenv": "^17.3.1",
+    "env-paths": "^4.0.0",
+    "execa": "^9.6.1",
+    "ink": "^6.8.0",
+    "ink-spinner": "^5.0.0",
+    "ink-text-input": "^6.0.0",
+    "openai": "^6.27.0",
+    "react": "^19.2.4",
+    "trash": "^10.1.1",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^25.3.3",
+    "@types/react": "^19.2.14",
+    "caxa": "^3.0.1",
+    "esbuild": "^0.25.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}
