@@ -1,17 +1,44 @@
 {
   "name": "fella-cli",
   "version": "1.0.0",
-  "description": "File Exploration and Local Logic Automation - An Agentic CLI",
+  "description": "File Exploration and Local Logic Automation — An AI-powered agentic CLI for Windows",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
     "fella": "dist/index.js"
   },
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Deepakchandrasekar05/FELLA.git"
+  },
+  "homepage": "https://github.com/Deepakchandrasekar05/FELLA#readme",
+  "bugs": {
+    "url": "https://github.com/Deepakchandrasekar05/FELLA/issues"
+  },
+  "keywords": [
+    "cli",
+    "ai",
+    "agent",
+    "file-manager",
+    "terminal",
+    "automation",
+    "windows",
+    "llm",
+    "groq",
+    "ink",
+    "natural-language"
+  ],
+  "author": "Deepakchandrasekar05",
+  "license": "ISC",
   "scripts": {
     "typecheck": "tsc --noEmit",
     "bundle": "node scripts/bundle.mjs",
     "postbundle": "node scripts/postbundle.mjs",
     "build": "npm run typecheck && npm run bundle",
+    "prepublishOnly": "npm run build",
     "predist": "node scripts/predist.mjs",
     "sea": "npm run build && node scripts/sea.mjs",
     "caxa:win": "npm run build && caxa --input dist --output bin/fella-win.exe -- \"{{caxa}}/node_modules/.bin/node\" \"{{caxa}}/index.js\"",
@@ -20,9 +47,6 @@
     "dist": "taskkill /F /IM fella-win.exe 2>nul & npm run build && caxa --input dist --output bin/fella-win.exe -- node \"{{caxa}}/run.cjs\"",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
   "dependencies": {
     "@nut-tree-fork/nut-js": "^4.2.6",
     "@supabase/supabase-js": "^2.98.0",

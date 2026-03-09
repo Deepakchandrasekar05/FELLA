@@ -1,7 +1,23 @@
 .env
-assets/*.png.bak
-bin/
-scripts/
+.env.*
+.vscode/
+.gitattributes
+GUIDE.md
+
+# source
 src/
+scripts/
 tsconfig.json
 sea-config.json
+
+# binary build artifacts
+bin/
+dist/run.cjs
+dist/node_modules/
+dist/assets/
+dist/sea-prep.blob
+dist/*.map
+
+# large runtime assets not needed by npm users
+assets/page.png
+assets/*.png.bak

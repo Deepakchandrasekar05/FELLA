@@ -1,7 +1,8 @@
 // engine.ts — Stateful conversation engine bridging the CLI and Ollama
 
-import { join, basename, dirname } from 'node:path';
+import { join, basename, dirname, extname } from 'node:path';
 import { rename, mkdir, rm, rmdir, access } from 'node:fs/promises';
+import { readdirSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { ollamaClient, OllamaError } from '../llm/ollama.js';
 import type { OllamaMessage } from '../llm/schema.js';
@@ -245,16 +246,43 @@ export class Engine {
       );
 
     if (openFileMatch) {
-      const fileName   = openFileMatch[1]!.trim();
+      // Strip leading articles ("the test folder" → "test folder")
+      let fileName   = openFileMatch[1]!.trim().replace(/^(?:the|a|an)\s+/i, '');
       const folderName = openFileMatch[2]!.trim();
+
+      // If the name ends with " folder" / " directory", it's a sub-folder to
+      // navigate into, not a file to open.  Try two paths:
+      //   1. desktop/test folder   (folder literally named "test folder")
+      //   2. desktop/test          (trailing word was just descriptive)
+      const folderSuffix = /\s+(?:folder|directory|dir)$/i;
+      const isSubFolder  = folderSuffix.test(fileName);
+      const cleanName    = fileName.replace(folderSuffix, '').trim();
+
       this.history.push({ role: 'user', content: userMessage });
       let reply: string;
       try {
-        reply = await executeTool('screenAutomation', {
-          action: 'navigate',
-          path:   folderName,
-          file:   fileName,
-        });
+        if (isSubFolder) {
+          // Navigate: first try the full name (e.g. "test folder"), then bare name ("test")
+          const baseDir   = resolvePath(folderName);
+          const candidate = join(baseDir, fileName);
+          const fallback  = join(baseDir, cleanName);
+          let subPath: string;
+          try {
+            await access(candidate);
+            subPath = candidate;
+          } catch {
+            await access(fallback);  // throws if neither exists
+            subPath = fallback;
+          }
+          await executeTool('screenAutomation', { action: 'navigate', path: subPath });
+          reply = `Opened folder "${basename(subPath)}" inside ${folderName}`;
+        } else {
+          reply = await executeTool('screenAutomation', {
+            action: 'navigate',
+            path:   folderName,
+            file:   fileName,
+          });
+        }
       } catch (err) {
         reply = `Navigate error: ${err instanceof Error ? err.message : String(err)}`;
       }
@@ -292,15 +320,79 @@ export class Engine {
     }
     // ─────────────────────────────────────────────────────────────────────────
 
+    // ── Keyword bypass — "open the last/latest/recently downloaded <type>" ──────
+    // e.g. "open the lastly downloaded image", "open latest downloaded pdf"
+    const openLastDownloadedMatch = userMessage.trim().match(
+      /^open\s+(?:the\s+)?(?:last(?:ly|est)?\s+downloaded|latest\s+downloaded|most\s+recent(?:ly)?\s+downloaded|recently\s+downloaded)\s+(.+)$/i,
+    );
+    if (openLastDownloadedMatch) {
+      const typeHint = openLastDownloadedMatch[1]!.trim().toLowerCase();
+
+      // Map type hints to extensions
+      const TYPE_EXT_MAP: Record<string, string[]> = {
+        image:    ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.heic', '.avif', '.tiff', '.svg'],
+        photo:    ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.heic', '.avif'],
+        picture:  ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.heic', '.avif'],
+        video:    ['.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v'],
+        audio:    ['.mp3', '.wav', '.flac', '.aac', '.ogg', '.m4a', '.wma'],
+        pdf:      ['.pdf'],
+        document: ['.pdf', '.docx', '.doc', '.txt', '.odt', '.rtf'],
+        zip:      ['.zip', '.rar', '.7z', '.tar', '.gz'],
+        archive:  ['.zip', '.rar', '.7z', '.tar', '.gz'],
+        exe:      ['.exe', '.msi'],
+        installer:['.exe', '.msi'],
+      };
+
+      const allowedExts = TYPE_EXT_MAP[typeHint] ?? null; // null = any file
+
+      this.history.push({ role: 'user', content: userMessage });
+      let reply: string;
+      try {
+        const downloadsDir = resolvePath('downloads');
+        const entries = readdirSync(downloadsDir, { withFileTypes: true });
+        const files = entries
+          .filter((e) => {
+            if (!e.isFile()) return false;
+            if (!allowedExts) return true;
+            return allowedExts.includes(extname(e.name).toLowerCase());
+          })
+          .map((e) => ({
+            name:  e.name,
+            mtime: statSync(join(downloadsDir, e.name)).mtimeMs,
+          }))
+          .sort((a, b) => b.mtime - a.mtime);
+
+        if (files.length === 0) {
+          reply = allowedExts
+            ? `No ${typeHint} files found in Downloads.`
+            : 'Downloads folder is empty.';
+        } else {
+          const newest = files[0]!;
+          reply = await executeTool('screenAutomation', {
+            action: 'navigate',
+            path:   'downloads',
+            file:   newest.name,
+          });
+          reply = `Opening latest downloaded ${typeHint}: "${newest.name}"\n${reply}`;
+        }
+      } catch (err) {
+        reply = `Error opening last downloaded ${typeHint}: ${err instanceof Error ? err.message : String(err)}`;
+      }
+      this.history.push({ role: 'assistant', content: reply });
+      return reply;
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
     // ── Keyword bypass — directly launch apps without risking LLM non-compliance ─
+    // Only matches short, app-name-like strings (no "the", "lastly", "downloaded", etc.)
     const launchMatch = userMessage
       .trim()
-      .match(/^(?:open|launch|start|run)\s+([a-z0-9 _.-]+)$/i);
+      .match(/^(?:open|launch|start|run)\s+([a-z0-9][a-z0-9 _.-]{0,40})$/i);
     if (launchMatch) {
       const appName = launchMatch[1]!.trim().toLowerCase();
-      // Only bypass for known app names to avoid false positives
-        // Always bypass — Win+R handles any executable name or .exe gracefully.
-      if (true) {
+      // Reject if it looks like a sentence fragment (contains common filler words)
+      const SENTENCE_WORDS = /\b(?:the|a|an|my|this|that|last(?:ly|est)?|latest|recent(?:ly)?|downloaded|file|image|photo|video|document|folder|from|in|on|to)\b/i;
+      if (!SENTENCE_WORDS.test(appName)) {
         this.history.push({ role: 'user', content: userMessage });
         let reply: string;
         try {

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo.png" alt="FELLA" width="487"/>
+  <img src="https://raw.githubusercontent.com/Deepakchandrasekar05/FELLA/main/assets/logo.png" alt="FELLA" width="487"/>
 </p>
 
 <p align="center">
