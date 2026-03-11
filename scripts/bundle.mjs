@@ -7,6 +7,8 @@ import { execSync }    from 'child_process';
 import { config }      from 'dotenv';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import * as esbuild    from 'esbuild';
+import { copyFileSync } from 'fs';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -29,21 +31,40 @@ const defines = [
   def('SUPABASE_ANON_KEY'),
 ].join(' ');
 
-const cmd = [
-  'esbuild src/index.tsx',
-  '--bundle',
-  '--platform=node',
-  '--format=esm',
-  '--outfile=dist/index.js',
+const externalList = [
+  'better-sqlite3',
+  'trash',
+  '@nut-tree-fork/nut-js',
+  '@nut-tree-fork/shared',
+  '@nut-tree-fork/provider-interfaces',
+];
+
+const externals = [
   '--external:better-sqlite3',
   '--external:trash',
   '--external:@nut-tree-fork/nut-js',
   '--external:@nut-tree-fork/shared',
   '--external:@nut-tree-fork/provider-interfaces',
   '--alias:react-devtools-core=./src/stubs/devtools-stub.js',
+].join(' ');
+
+// ESM bundle — used at dev/runtime via `node dist/index.js`
+const esmCmd = [
+  'esbuild src/index.tsx',
+  '--bundle',
+  '--platform=node',
+  '--format=esm',
+  '--outfile=dist/index.js',
+  externals,
   `--banner:js="import{createRequire}from'module';const require=createRequire(import.meta.url);"`,
   defines,
 ].join(' ');
 
+// CJS bundle — used as the Node.js SEA entry (SEA only supports CJS).
+// Top-level await is wrapped in an async IIFE via banner/footer.
+// import.meta.url is polyfilled with a pathToFileURL(__filename) shim.
+copyFileSync(resolve(root, 'src/sea-entry.cjs'), resolve(root, 'dist/sea-entry.cjs'));
+console.log('  ✔  dist/sea-entry.cjs (SEA bootstrap) copied');
+
 console.log('▸ Bundling with secrets injected from .env…');
-execSync(cmd, { stdio: 'inherit', cwd: root });
+execSync(esmCmd, { stdio: 'inherit', cwd: root });

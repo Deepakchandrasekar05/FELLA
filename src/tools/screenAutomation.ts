@@ -139,8 +139,32 @@ async function locateText(nut: NutModule, text: string): Promise<{ x: number; y:
 
 // â”€â”€ Actions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+/** System directory names that must never be launched or opened as apps. */
+const BLOCKED_SYSTEM_APPS = new Set([
+  'program files', 'program files (x86)',
+  'programfiles',  'programfiles(x86)',
+  'windows',       'system32', 'syswow64', 'sysarm32',
+  'programdata',   'winsxs',   'servicing',
+  'system volume information', 'recovery', 'boot',
+]);
+
 async function actionLaunch(app: string): Promise<string> {
-  const executable = RUN_DIALOG_MAP[app.toLowerCase()] ?? app;
+  const appLower = app.toLowerCase().trim();
+
+  // Hard block — never launch system directories
+  if (
+    BLOCKED_SYSTEM_APPS.has(appLower) ||
+    appLower.startsWith('c:\\windows') ||
+    appLower.startsWith('c:\\program files')
+  ) {
+    throw new Error(
+      `⛔ Access denied: Cannot open or launch system directories.\n` +
+      `"${app}" is a protected system location (Windows, Program Files, ProgramData, etc.).\n` +
+      `I can only open applications and user files — not system folders.`,
+    );
+  }
+
+  const executable = RUN_DIALOG_MAP[appLower] ?? app;
 
   // ── Step 1: search Start Menu for a matching .lnk shortcut ────────────────
   // This handles apps like "PC Remote Receiver" that are not PATH commands.
@@ -374,6 +398,29 @@ async function actionNavigate(
 ): Promise<string> {
   const rawPath = String(args['path'] ?? args['folder'] ?? args['target'] ?? '');
   if (!rawPath) throw new Error('"path" is required for navigate action');
+
+  // Hard block — reject system directory names before any path resolution
+  const rawLower = rawPath.toLowerCase().trim();
+  const isSystemPath =
+    BLOCKED_SYSTEM_APPS.has(rawLower) ||
+    /^[a-z]:[/\\]windows([/\\]|$)/i.test(rawPath) ||
+    /^[a-z]:[/\\]program files/i.test(rawPath) ||
+    /^[a-z]:[/\\]programdata/i.test(rawPath);
+  if (isSystemPath) {
+    throw new Error(
+      `⛔ Access denied: Cannot navigate to system directories.\n` +
+      `"${rawPath}" is a protected system location.\n` +
+      `I can only navigate to user folders (Documents, Downloads, Desktop, etc.) and D:\.`,
+    );
+  }
+
+  // If path itself is a full file path (has a file extension), open it directly.
+  const FILE_EXT = /\.(?:pdf|docx?|xlsx?|pptx?|txt|csv|mp4|mkv|avi|mov|wmv|mp3|flac|jpg|jpeg|png|gif|webp|zip|rar|7z|exe|msi|iso|odt|rtf)$/i;
+  if (FILE_EXT.test(rawPath.trim()) && !args['file']) {
+    const resolvedFile = resolvePath(rawPath);
+    await execa('cmd', ['/c', 'start', '', resolvedFile], { reject: false });
+    return `Opened "${resolvedFile}" with its default application`;
+  }
 
   // Resolve virtual shell folders before hitting the filesystem path guard.
   const shellPath = SHELL_VIRTUAL_FOLDERS[rawPath.trim().toLowerCase()];

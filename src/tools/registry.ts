@@ -1,5 +1,6 @@
 ﻿// registry.ts — Tool dispatch table
 import { listFiles }         from './listFiles.js';
+import { findFile }          from './findFile.js';
 import { deleteFile }        from './deleteFile.js';
 import { moveFile }          from './moveFile.js';
 import { createDirectory }   from './createDirectory.js';
@@ -12,6 +13,7 @@ type ToolHandler = (args: ToolArgs) => Promise<string>;
 
 const handlers: Record<ToolName, ToolHandler> = {
   listFiles,
+  findFile,
   deleteFile,
   moveFile,
   // openApplication delegates to screenAutomation so launches are always visible

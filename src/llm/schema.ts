@@ -88,6 +88,7 @@ export type OllamaJsonPayload = z.infer<typeof OllamaJsonPayloadSchema>;
 /** Named tools the engine can execute. */
 export const TOOL_NAMES = [
   'listFiles',
+  'findFile',
   'deleteFile',
   'moveFile',
   'openApplication',

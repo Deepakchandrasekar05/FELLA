@@ -228,67 +228,15 @@ export class Engine {
     }
     // ─────────────────────────────────────────────────────────────────────────
 
-    // ── Keyword bypass — navigate Explorer to a folder / open a file ──────
-    //  "navigate to downloads"         → navigate, path=downloads
-    //  "open downloads folder"         → navigate, path=downloads
-    //  "go to D:\Projects"             → navigate, path=D:\Projects
-    //  "open report.pdf from downloads"→ navigate, path=downloads, file=report.pdf
-    //  "open report.pdf in documents"  → navigate, path=documents, file=report.pdf
+    // ── Keyword bypass — navigate Explorer to a known folder alias / absolute path ──
+    //  "navigate to downloads"  → navigate, path=downloads
+    //  "go to D:\Projects"      → navigate, path=D:\Projects
+    // Complex queries like "open X in folder named Y" fall through to the LLM.
     const navigateMatch = userMessage
       .trim()
       .match(
-        /^(?:navigate\s+to|go\s+to|open|show(?:\s+me)?)\s+(?:the\s+)?([^\s].+?)(?:\s+folder)?$/i,
+        /^(?:navigate\s+to|go\s+to|show(?:\s+me)?)\s+(?:the\s+)?([^\s].+?)(?:\s+folder)?$/i,
       );
-    const openFileMatch = userMessage
-      .trim()
-      .match(
-        /^open\s+(.+?)\s+(?:from|in|inside)\s+(?:the\s+)?(.+?)(?:\s+folder)?$/i,
-      );
-
-    if (openFileMatch) {
-      // Strip leading articles ("the test folder" → "test folder")
-      let fileName   = openFileMatch[1]!.trim().replace(/^(?:the|a|an)\s+/i, '');
-      const folderName = openFileMatch[2]!.trim();
-
-      // If the name ends with " folder" / " directory", it's a sub-folder to
-      // navigate into, not a file to open.  Try two paths:
-      //   1. desktop/test folder   (folder literally named "test folder")
-      //   2. desktop/test          (trailing word was just descriptive)
-      const folderSuffix = /\s+(?:folder|directory|dir)$/i;
-      const isSubFolder  = folderSuffix.test(fileName);
-      const cleanName    = fileName.replace(folderSuffix, '').trim();
-
-      this.history.push({ role: 'user', content: userMessage });
-      let reply: string;
-      try {
-        if (isSubFolder) {
-          // Navigate: first try the full name (e.g. "test folder"), then bare name ("test")
-          const baseDir   = resolvePath(folderName);
-          const candidate = join(baseDir, fileName);
-          const fallback  = join(baseDir, cleanName);
-          let subPath: string;
-          try {
-            await access(candidate);
-            subPath = candidate;
-          } catch {
-            await access(fallback);  // throws if neither exists
-            subPath = fallback;
-          }
-          await executeTool('screenAutomation', { action: 'navigate', path: subPath });
-          reply = `Opened folder "${basename(subPath)}" inside ${folderName}`;
-        } else {
-          reply = await executeTool('screenAutomation', {
-            action: 'navigate',
-            path:   folderName,
-            file:   fileName,
-          });
-        }
-      } catch (err) {
-        reply = `Navigate error: ${err instanceof Error ? err.message : String(err)}`;
-      }
-      this.history.push({ role: 'assistant', content: reply! });
-      return reply!;
-    }
 
     // Known folder names for the plain "navigate to X" bypass
     const FOLDER_ALIASES = new Set([
@@ -392,7 +340,9 @@ export class Engine {
       const appName = launchMatch[1]!.trim().toLowerCase();
       // Reject if it looks like a sentence fragment (contains common filler words)
       const SENTENCE_WORDS = /\b(?:the|a|an|my|this|that|last(?:ly|est)?|latest|recent(?:ly)?|downloaded|file|image|photo|video|document|folder|from|in|on|to)\b/i;
-      if (!SENTENCE_WORDS.test(appName)) {
+      // Reject if it looks like a filename (has a document/media extension) — let the LLM handle it
+      const FILE_EXT = /\.(?:pdf|docx?|xlsx?|pptx?|txt|csv|odt|rtf|mp4|mkv|avi|mov|wmv|mp3|flac|aac|jpg|jpeg|png|gif|webp|zip|rar|7z|exe|msi|iso)$/i;
+      if (!SENTENCE_WORDS.test(appName) && !FILE_EXT.test(appName)) {
         this.history.push({ role: 'user', content: userMessage });
         let reply: string;
         try {
@@ -426,7 +376,7 @@ export class Engine {
 
       if (CANCEL_WORDS.has(token)) {
         this.pendingConfirmation = null;
-        const reply = 'Cancelled — no files were moved.';
+        const reply = 'Cancelled — no changes were made.';
         this.history.push({ role: 'user',      content: userMessage });
         this.history.push({ role: 'assistant', content: reply });
         return reply;
@@ -449,45 +399,71 @@ export class Engine {
     // ─────────────────────────────────────────────────────────────────────────
 
     try {
-      const payload = await ollamaClient.chat(this.history);
+      // ── Agentic loop — up to MAX_STEPS tool calls before forcing a reply ──
+      const MAX_STEPS = 8;
 
-      // ── Tool-call path ──────────────────────────────────────────────────────
-      if (payload.tool) {
-        const args        = (payload.args ?? {}) as Record<string, unknown>;
-        const resolvedTool = resolveToolName(payload.tool);
-        let reply: string;
-        try {
-          reply = await this.executeWithHistory(payload.tool, args);
+      for (let step = 0; step < MAX_STEPS; step++) {
+        const payload = await ollamaClient.chat(this.history);
 
-          // organiseByRule with dry_run (default) — store pending confirmation
-          if (resolvedTool === 'organiseByRule' && args['dry_run'] !== false) {
-            this.pendingConfirmation = {
-              tool: 'organiseByRule',
-              args: { ...args, dry_run: false },
-            };
+        // ── Tool-call path ────────────────────────────────────────────────────
+        if (payload.tool) {
+          const args         = (payload.args ?? {}) as Record<string, unknown>;
+          const resolvedTool = resolveToolName(payload.tool);
+
+          // Record the LLM's intent into history before running the tool
+          this.history.push({
+            role:    'assistant',
+            content: JSON.stringify({ tool: payload.tool, args }),
+          });
+
+          let toolResult: string;
+          try {
+            // ── deleteFile: intercept and ask for confirmation ──────────────
+            if (resolvedTool === 'deleteFile') {
+              const filePath = String(args['path'] ?? '');
+              this.pendingConfirmation = { tool: 'deleteFile', args };
+              const confirmReply = `Are you sure you want to delete "${filePath}"? This cannot be undone. (yes / no)`;
+              this.history.push({ role: 'assistant', content: confirmReply });
+              return confirmReply;
+            }
+
+            toolResult = await this.executeWithHistory(payload.tool, args);
+
+            // organiseByRule with dry_run → queue a confirmation for the next turn
+            if (resolvedTool === 'organiseByRule' && args['dry_run'] !== false) {
+              this.pendingConfirmation = {
+                tool: 'organiseByRule',
+                args: { ...args, dry_run: false },
+              };
+            }
+          } catch (toolErr) {
+            toolResult = `Tool error (${payload.tool}): ${toolErr instanceof Error ? toolErr.message : String(toolErr)}`;
           }
-        } catch (toolErr) {
-          reply = `Tool error (${payload.tool}): ${toolErr instanceof Error ? toolErr.message : String(toolErr)}`;
+
+          // Feed the result back so the LLM can reason about it on the next step
+          this.history.push({ role: 'user', content: `[Tool result]\n${toolResult}` });
+          continue; // ← let the LLM decide the next step
         }
-        this.history.push({ role: 'assistant', content: reply! });
-        return reply!;
+
+        // ── Conversational / planning reply ───────────────────────────────────
+        let reply: string;
+        if (payload.error) {
+          reply = `Error from model: ${payload.error}`;
+        } else if (typeof payload.response === 'string' && payload.response.trim()) {
+          reply = payload.response.trim();
+        } else {
+          reply = '(no response)';
+        }
+
+        this.history.push({ role: 'assistant', content: reply });
+        return reply;
       }
 
-      // ── Conversational path ─────────────────────────────────────────────────
-      let reply: string;
+      // Exceeded step limit — tell the user
+      const limitReply = 'I reached my planning limit without finishing. Please try rephrasing your request.';
+      this.history.push({ role: 'assistant', content: limitReply });
+      return limitReply;
 
-      if (payload.error) {
-        reply = `Error from model: ${payload.error}`;
-      } else if (typeof payload.response === 'string' && payload.response.trim()) {
-        reply = payload.response.trim();
-      } else {
-        reply = '(no response)';
-      }
-
-      // Append the assistant turn to history
-      this.history.push({ role: 'assistant', content: reply });
-
-      return reply;
     } catch (err) {
       // Remove the user turn we just added so history stays consistent
       this.history.pop();

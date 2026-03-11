@@ -96,12 +96,42 @@ const KNOWN_FOLDERS: Record<string, string> = {
 // ── Access policy ─────────────────────────────────────────────────────────────
 
 /**
+ * System directories that must never be read or written.
+ * These protect the OS, installed programs, and system configuration.
+ */
+const BLOCKED_SYSTEM_PATHS = [
+  normalize('C:\\Windows\\'),
+  normalize('C:\\Program Files\\'),
+  normalize('C:\\Program Files (x86)\\'),
+  normalize('C:\\ProgramData\\'),
+  normalize('C:\\System Volume Information\\'),
+  normalize('C:\\Recovery\\'),
+  normalize('C:\\Boot\\'),
+  normalize('C:\\EFI\\'),
+].map(p => p.toUpperCase());
+
+/**
  * Throws if the resolved absolute path is not within an allowed zone:
  *   • C:\Users\  (the current user tree, and their Temp)
  *   • D:\        (entire D drive)
+ *
+ * System directories (Windows, Program Files, ProgramData, etc.) are
+ * always blocked regardless of which drive they reside on.
  */
 export function assertAllowed(absPath: string): void {
   const norm  = normalize(absPath).toUpperCase();
+
+  // Hard block — system directories must never be accessed
+  for (const blocked of BLOCKED_SYSTEM_PATHS) {
+    if (norm.startsWith(blocked) || norm === blocked.replace(/\\$/, '')) {
+      throw new Error(
+        `⛔ Access denied: Cannot access system files or directories.\n` +
+        `"${absPath}" is a protected system path (Windows, Program Files, ProgramData, etc.).\n` +
+        `Modifying system files could break your computer's configuration.`,
+      );
+    }
+  }
+
   const cUser = normalize('C:\\Users\\').toUpperCase();
   const dRoot = normalize('D:\\').toUpperCase();
 
