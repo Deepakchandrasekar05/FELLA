@@ -79,3 +79,10 @@ export async function executeTool(tool: string, args: ToolArgs): Promise<string>
   }
   return handlers[resolved](args);
 }
+
+/** Class adapter for code paths that prefer an OO tool registry. */
+export class ToolRegistry {
+  async execute(tool: string, args: ToolArgs): Promise<string> {
+    return executeTool(tool, args);
+  }
+}

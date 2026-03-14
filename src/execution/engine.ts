@@ -2,14 +2,16 @@
 
 import { join, basename, dirname, extname } from 'node:path';
 import { rename, mkdir, rm, rmdir, access } from 'node:fs/promises';
-import { readdirSync, statSync } from 'node:fs';
+import { readdirSync, statSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { ollamaClient, OllamaError } from '../llm/ollama.js';
+import { randomBytes } from 'node:crypto';
+import { AgentLoop, AgentLoopHalt, type AgentStep } from '../agent/loop.js';
 import type { OllamaMessage } from '../llm/schema.js';
 import { resolvePath } from '../security/pathGuard.js';
 import { executeTool, resolveToolName } from '../tools/registry.js';
 import { UndoStack }            from './history.js';
 import { buildPlan, executePlan, resolveSinceDate } from '../tools/organiseByRule.js';
+import { MemoryStore } from '../memory/store.js';
 
 /** Soft-delete staging area — files are moved here instead of permanently removed. */
 const TRASH_DIR = join(tmpdir(), '.fella-trash');
@@ -27,8 +29,178 @@ interface PendingConfirmation {
   args: Record<string, unknown>;
 }
 
+interface PendingSelection {
+  kind: 'navigate-folder' | 'delete-folder';
+  options: string[];
+}
+
 const CONFIRM_WORDS = new Set(['yes', 'y', 'confirm', 'do it', 'proceed', 'ok', 'sure']);
 const CANCEL_WORDS  = new Set(['no', 'n', 'cancel', 'stop', 'abort', 'nope']);
+
+const FOLDER_SEARCH_MAX_DEPTH = 8;
+const FOLDER_SEARCH_MAX_RESULTS = 8;
+const DEFAULT_SEARCH_DIRS = [
+  'downloads',
+  'documents',
+  'desktop',
+  'videos',
+  'pictures',
+  'music',
+  'd:',
+];
+
+const SYSTEM_DIRS = new Set([
+  'windows',
+  'system32',
+  'syswow64',
+  'sysarm32',
+  'program files',
+  'program files (x86)',
+  'programdata',
+  'system volume information',
+  'recovery',
+  'boot',
+  'efi',
+  'winsxs',
+  'servicing',
+]);
+
+const JUNK_DIRS = new Set([
+  '$recycle.bin',
+  '$recycler',
+  'node_modules',
+  '.git',
+  '.svn',
+  '.hg',
+  '.tmp',
+  'temp',
+]);
+
+type FolderMatch = {
+  path: string;
+  name: string;
+  score: number;
+  depth: number;
+};
+
+function tokenise(name: string): string[] {
+  return name
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .replace(/([a-zA-Z])(\d)/g, '$1 $2')
+    .replace(/(\d)([a-zA-Z])/g, '$1 $2')
+    .split(/[\s_\-.]+/)
+    .map((token) => token.toLowerCase())
+    .filter((token) => token.length > 1);
+}
+
+function scoreName(name: string, queryTokens: string[]): number {
+  if (queryTokens.length === 0) return 0;
+  const tokens = tokenise(name);
+  let hits = 0;
+  for (const queryToken of queryTokens) {
+    if (tokens.some((token) => token.includes(queryToken) || queryToken.includes(token))) {
+      hits += 1;
+    }
+  }
+  return hits / queryTokens.length;
+}
+
+function isSystemDir(name: string): boolean {
+  return SYSTEM_DIRS.has(name.toLowerCase());
+}
+
+function isJunkDir(name: string): boolean {
+  return JUNK_DIRS.has(name.toLowerCase()) || name.startsWith('$');
+}
+
+function walkFolders(
+  dir: string,
+  queryTokens: string[],
+  depth: number,
+  results: FolderMatch[],
+): void {
+  if (depth > FOLDER_SEARCH_MAX_DEPTH || results.length >= FOLDER_SEARCH_MAX_RESULTS * 4) return;
+
+  let entries: import('node:fs').Dirent<string>[];
+  try {
+    entries = readdirSync(dir, { withFileTypes: true }) as import('node:fs').Dirent<string>[];
+  } catch {
+    return;
+  }
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+
+    const name = String(entry.name);
+    if (isSystemDir(name) || isJunkDir(name)) continue;
+
+    const fullPath = join(dir, name);
+    const matchScore = scoreName(name, queryTokens);
+    if (matchScore >= 1) {
+      results.push({ path: fullPath, name, score: matchScore, depth });
+    }
+
+    walkFolders(fullPath, queryTokens, depth + 1, results);
+  }
+}
+
+function findFoldersByName(folderName: string): string[] {
+  const queryTokens = tokenise(folderName.trim());
+  if (queryTokens.length === 0) return [];
+
+  const searchRoots = DEFAULT_SEARCH_DIRS.flatMap((dir) => {
+    try {
+      const resolved = resolvePath(dir);
+      return existsSync(resolved) ? [resolved] : [];
+    } catch {
+      return [];
+    }
+  });
+
+  const matches: FolderMatch[] = [];
+  for (const root of searchRoots) {
+    const rootName = basename(root);
+    const rootScore = scoreName(rootName, queryTokens);
+    if (rootScore >= 1) {
+      matches.push({ path: root, name: rootName, score: rootScore, depth: 0 });
+    }
+    walkFolders(root, queryTokens, 1, matches);
+  }
+
+  const unique = matches.filter((match, index, all) =>
+    all.findIndex((candidate) => candidate.path === match.path) === index,
+  );
+
+  unique.sort((left, right) => left.depth - right.depth || left.name.length - right.name.length || left.path.localeCompare(right.path));
+  return unique.slice(0, FOLDER_SEARCH_MAX_RESULTS).map((match) => match.path);
+}
+
+function buildFolderChoicePrompt(folderName: string, options: string[]): string {
+  const lines = options.map((option, index) => `${index + 1}. ${option}`);
+  return `I found multiple folders named "${folderName}". Which one should I open?\n${lines.join('\n')}`;
+}
+
+function generateSessionId(): string {
+  const now = new Date();
+  const date = now.toISOString().slice(0, 10).replace(/-/g, '');
+  const time = now.toTimeString().slice(0, 5).replace(':', '');
+  const rand = randomBytes(2).toString('hex');
+  return `sess-${date}-${time}-${rand}`;
+}
+
+function isVisibleTurn(role: string, content: string): boolean {
+  if (role === 'user') {
+    return (
+      !content.startsWith('Tool result:') &&
+      !content.includes('Continue working toward the goal:')
+    );
+  }
+  if (role === 'assistant') {
+    const trimmed = content.trim();
+    return !(trimmed.startsWith('{') && trimmed.endsWith('}'));
+  }
+  return false;
+}
 
 // ── Engine ────────────────────────────────────────────────────────────────────
 
@@ -44,8 +216,78 @@ export class Engine {
   /** Pending destructive action awaiting "yes" confirmation. */
   private pendingConfirmation: PendingConfirmation | null = null;
 
+  /** Pending folder disambiguation awaiting a numeric selection. */
+  private pendingSelection: PendingSelection | null = null;
+
   /** Undo / Redo stack — tracks reversible file operations. */
   private undoStack = new UndoStack();
+
+  /** ReAct loop runner used for multi-step planning and tool use. */
+  private agentLoop: AgentLoop;
+
+  /** Persistent store that owns the session turns table. */
+  private sessionStore: MemoryStore;
+
+  /** Unique identifier for this session, shown to the user. */
+  private _sessionId: string;
+
+  /** Index into this.history up to which turns have already been persisted. */
+  private lastSavedIdx = 0;
+
+  constructor(resumeSessionId?: string) {
+    this.sessionStore = new MemoryStore();
+
+    if (resumeSessionId) {
+      const turns = this.sessionStore.loadSessionHistory(resumeSessionId);
+      this.history = turns.map((t) => ({
+        role: t.role as OllamaMessage['role'],
+        content: t.content,
+      }));
+      this._sessionId = resumeSessionId;
+    } else {
+      this._sessionId = generateSessionId();
+      this.sessionStore.createSession(this._sessionId);
+    }
+
+    this.lastSavedIdx = this.history.length;
+
+    this.agentLoop = new AgentLoop({
+      maxSteps: 8,
+      executeTool: async (tool, args) => this.executeAgentTool(tool, args),
+    });
+  }
+
+  /** Unique identifier for this session. */
+  get id(): string {
+    return this._sessionId;
+  }
+
+  /** Returns visible turns from this session for UI reconstruction on resume. */
+  getVisibleHistory(): Array<{ role: string; content: string }> {
+    return this.sessionStore
+      .loadSessionHistory(this._sessionId)
+      .filter((t) => t.visible)
+      .map((t) => ({ role: t.role, content: t.content }));
+  }
+
+  /** Persist any new history messages added since the last checkpoint. */
+  private persistDelta(): void {
+    const newMessages = this.history.slice(this.lastSavedIdx);
+    const now = new Date().toISOString();
+    for (const msg of newMessages) {
+      this.sessionStore.appendTurn(
+        this._sessionId,
+        msg.role,
+        msg.content,
+        now,
+        isVisibleTurn(msg.role, msg.content),
+      );
+    }
+    if (newMessages.length > 0) {
+      this.sessionStore.touchSession(this._sessionId);
+    }
+    this.lastSavedIdx = this.history.length;
+  }
 
   // ── Private: execute a tool and record a matching undo entry ───────────────
 
@@ -77,7 +319,16 @@ export class Engine {
 
       await mkdir(TRASH_DIR, { recursive: true });
       const trashPath = join(TRASH_DIR, `${Date.now()}_${basename(resolvedPath)}`);
-      await rename(resolvedPath, trashPath);
+      try {
+        await rename(resolvedPath, trashPath);
+      } catch (renameErr) {
+        if ((renameErr as NodeJS.ErrnoException).code === 'EXDEV') {
+          // Cross-drive move — fall back to a destructive delete (no undo available)
+          await rm(resolvedPath, { recursive: true, force: true });
+          return `Deleted: ${resolvedPath}`;
+        }
+        throw renameErr;
+      }
 
       this.undoStack.push({
         description: `delete ${basename(resolvedPath)}`,
@@ -170,16 +421,55 @@ export class Engine {
   }
 
   /**
-   * Send a user message to the model and return the assistant's reply as a
-   * plain string ready to display in the UI.
-   *
-   * The user message is appended to history before the request and the
-   * assistant reply is appended after, so every subsequent call carries the
-   * full context.
-   *
-   * @throws {OllamaError} if the HTTP request to Ollama fails.
+   * Engine-specific execution policy layered on top of tool execution.
+   * This keeps confirmation gates and deferred execution logic in one place.
    */
-  async send(userMessage: string): Promise<string> {
+  private async executeAgentTool(
+    tool: string,
+    args: Record<string, unknown>,
+  ): Promise<string> {
+    const resolvedTool = resolveToolName(tool);
+
+    if (resolvedTool === 'deleteFile') {
+      const filePath = String(args['path'] ?? '');
+      this.pendingConfirmation = { tool: 'deleteFile', args };
+      throw new AgentLoopHalt(
+        `Are you sure you want to delete "${filePath}"? This cannot be undone. (yes / no)`,
+      );
+    }
+
+    const result = await this.executeWithHistory(tool, args);
+
+    // organiseByRule with dry_run queues the execute step for explicit confirmation.
+    if (resolvedTool === 'organiseByRule' && args['dry_run'] !== false) {
+      this.pendingConfirmation = {
+        tool: 'organiseByRule',
+        args: { ...args, dry_run: false },
+      };
+    }
+
+    return result;
+  }
+
+  /**
+   * Public entry-point: delegates to sendInner and persists the new history
+   * turns unconditionally (even on error) via a finally block.
+   */
+  async send(
+    userMessage: string,
+    onStep?: (step: AgentStep) => void,
+  ): Promise<string> {
+    try {
+      return await this.sendInner(userMessage, onStep);
+    } finally {
+      this.persistDelta();
+    }
+  }
+
+  private async sendInner(
+    userMessage: string,
+    onStep?: (step: AgentStep) => void,
+  ): Promise<string> {
     // ── Undo / Redo keyword bypass ────────────────────────────────────────────
     const trimmed = userMessage.trim().toLowerCase();
     if (/^undo(\s+(the\s+)?(last\s+)?(operation|action|that|previous))?[.!]?$/i.test(trimmed)) {
@@ -201,6 +491,117 @@ export class Engine {
       } catch (err) {
         reply = `Redo failed: ${err instanceof Error ? err.message : String(err)}`;
       }
+      this.history.push({ role: 'assistant', content: reply });
+      return reply;
+    }
+
+    if (this.pendingSelection) {
+      const selection = Number.parseInt(userMessage.trim(), 10);
+      if (Number.isInteger(selection)) {
+        const chosenPath = this.pendingSelection.options[selection - 1];
+        if (chosenPath) {
+          const kind = this.pendingSelection.kind;
+          this.pendingSelection = null;
+          this.history.push({ role: 'user', content: userMessage });
+          let reply: string;
+          if (kind === 'delete-folder') {
+            this.pendingConfirmation = { tool: 'deleteFile', args: { path: chosenPath } };
+            reply = `Are you sure you want to permanently delete "${chosenPath}" and all its contents? (yes / no)`;
+          } else {
+            try {
+              reply = await executeTool('screenAutomation', {
+                action: 'navigate',
+                path: chosenPath,
+              });
+            } catch (err) {
+              reply = `Navigate error: ${err instanceof Error ? err.message : String(err)}`;
+            }
+          }
+          this.history.push({ role: 'assistant', content: reply! });
+          return reply!;
+        }
+
+        const reply = `Please choose a number between 1 and ${this.pendingSelection.options.length}.`;
+        this.history.push({ role: 'user', content: userMessage });
+        this.history.push({ role: 'assistant', content: reply });
+        return reply;
+      }
+
+      if (CANCEL_WORDS.has(trimmed)) {
+        this.pendingSelection = null;
+        const reply = 'Cancelled.';
+        this.history.push({ role: 'user', content: userMessage });
+        this.history.push({ role: 'assistant', content: reply });
+        return reply;
+      }
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
+    const openFolderMatch = userMessage
+      .trim()
+      .match(/^(?:open|show(?:\s+me)?|navigate\s+to|go\s+to)\s+(?:the\s+)?(.+?)\s+folder(?:\s+.*)?$/i);
+    if (openFolderMatch) {
+      const folderName = openFolderMatch[1]!.trim();
+      const folders = findFoldersByName(folderName);
+
+      this.history.push({ role: 'user', content: userMessage });
+
+      if (folders.length === 0) {
+        const reply = `I couldn't find a folder named "${folderName}".`;
+        this.history.push({ role: 'assistant', content: reply });
+        return reply;
+      }
+
+      if (folders.length === 1) {
+        let reply: string;
+        try {
+          reply = await executeTool('screenAutomation', {
+            action: 'navigate',
+            path: folders[0],
+          });
+        } catch (err) {
+          reply = `Navigate error: ${err instanceof Error ? err.message : String(err)}`;
+        }
+        this.history.push({ role: 'assistant', content: reply });
+        return reply;
+      }
+
+      this.pendingSelection = {
+        kind: 'navigate-folder',
+        options: folders,
+      };
+      const reply = buildFolderChoicePrompt(folderName, folders);
+      this.history.push({ role: 'assistant', content: reply });
+      return reply;
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
+  // ── Keyword bypass — delete folder directly without going through LLM ────
+  const deleteFolderMatch = userMessage
+      .trim()
+      .match(/^(?:delete|remove|trash|erase)\s+(?:the\s+)?(.+?)\s+folder(?:\s+.*)?$/i);
+    if (deleteFolderMatch) {
+      const folderName = deleteFolderMatch[1]!.trim();
+      const folders = findFoldersByName(folderName);
+
+      this.history.push({ role: 'user', content: userMessage });
+
+      if (folders.length === 0) {
+        const reply = `I couldn't find a folder named "${folderName}".`;
+        this.history.push({ role: 'assistant', content: reply });
+        return reply;
+      }
+
+      if (folders.length === 1) {
+        this.pendingConfirmation = { tool: 'deleteFile', args: { path: folders[0] } };
+        const reply = `Are you sure you want to permanently delete "${folders[0]}" and all its contents? (yes / no)`;
+        this.history.push({ role: 'assistant', content: reply });
+        return reply;
+      }
+
+      this.pendingSelection = { kind: 'delete-folder', options: folders };
+      const lines = folders.map((f, i) => `${i + 1}. ${f}`);
+      const reply = `I found multiple folders named "${folderName}". Which one should I delete?\n${lines.join('\n')}`;
       this.history.push({ role: 'assistant', content: reply });
       return reply;
     }
@@ -387,90 +788,22 @@ export class Engine {
     }
     // ──────────────────────────────────────────────────────────────────────
 
-    // Append the user turn to history
-    this.history.push({ role: 'user', content: userMessage });
-
     // ── Mock mode (FELLA_MOCK=1) ─────────────────────────────────────────────
     if (MOCK_MODE) {
       const reply = `[mock] You said: "${userMessage}"`;
+      this.history.push({ role: 'user', content: userMessage });
       this.history.push({ role: 'assistant', content: reply });
       return reply;
     }
     // ─────────────────────────────────────────────────────────────────────────
 
     try {
-      // ── Agentic loop — up to MAX_STEPS tool calls before forcing a reply ──
-      const MAX_STEPS = 8;
-
-      for (let step = 0; step < MAX_STEPS; step++) {
-        const payload = await ollamaClient.chat(this.history);
-
-        // ── Tool-call path ────────────────────────────────────────────────────
-        if (payload.tool) {
-          const args         = (payload.args ?? {}) as Record<string, unknown>;
-          const resolvedTool = resolveToolName(payload.tool);
-
-          // Record the LLM's intent into history before running the tool
-          this.history.push({
-            role:    'assistant',
-            content: JSON.stringify({ tool: payload.tool, args }),
-          });
-
-          let toolResult: string;
-          try {
-            // ── deleteFile: intercept and ask for confirmation ──────────────
-            if (resolvedTool === 'deleteFile') {
-              const filePath = String(args['path'] ?? '');
-              this.pendingConfirmation = { tool: 'deleteFile', args };
-              const confirmReply = `Are you sure you want to delete "${filePath}"? This cannot be undone. (yes / no)`;
-              this.history.push({ role: 'assistant', content: confirmReply });
-              return confirmReply;
-            }
-
-            toolResult = await this.executeWithHistory(payload.tool, args);
-
-            // organiseByRule with dry_run → queue a confirmation for the next turn
-            if (resolvedTool === 'organiseByRule' && args['dry_run'] !== false) {
-              this.pendingConfirmation = {
-                tool: 'organiseByRule',
-                args: { ...args, dry_run: false },
-              };
-            }
-          } catch (toolErr) {
-            toolResult = `Tool error (${payload.tool}): ${toolErr instanceof Error ? toolErr.message : String(toolErr)}`;
-          }
-
-          // Feed the result back so the LLM can reason about it on the next step
-          this.history.push({ role: 'user', content: `[Tool result]\n${toolResult}` });
-          continue; // ← let the LLM decide the next step
-        }
-
-        // ── Conversational / planning reply ───────────────────────────────────
-        let reply: string;
-        if (payload.error) {
-          reply = `Error from model: ${payload.error}`;
-        } else if (typeof payload.response === 'string' && payload.response.trim()) {
-          reply = payload.response.trim();
-        } else {
-          reply = '(no response)';
-        }
-
-        this.history.push({ role: 'assistant', content: reply });
-        return reply;
-      }
-
-      // Exceeded step limit — tell the user
-      const limitReply = 'I reached my planning limit without finishing. Please try rephrasing your request.';
-      this.history.push({ role: 'assistant', content: limitReply });
-      return limitReply;
-
+      const result = await this.agentLoop.run(userMessage, this.history, (step) => {
+        onStep?.(step);
+      });
+      this.history = result.messages as OllamaMessage[];
+      return result.finalResponse;
     } catch (err) {
-      // Remove the user turn we just added so history stays consistent
-      this.history.pop();
-
-      if (err instanceof OllamaError) {
-        throw err;
-      }
       throw new Error(
         err instanceof Error ? err.message : 'Unknown error communicating with Ollama',
       );
@@ -481,7 +814,9 @@ export class Engine {
   reset(): void {
     this.history = [];
     this.pendingConfirmation = null;
+    this.pendingSelection = null;
     this.undoStack.clear();
+    this.lastSavedIdx = 0;
   }
 
   /** Read-only snapshot of the current conversation history. */

@@ -19,17 +19,11 @@ if (error || !parsed) {
   process.exit(1);
 }
 
-function def(key) {
-  const val = parsed[key] ?? '';
-  // esbuild --define replaces the expression literally; wrap in JSON.stringify
-  return `--define:process.env.${key}=${JSON.stringify(JSON.stringify(val))}`;
-}
-
-const defines = [
-  def('GROQ_API_KEY'),
-  def('SUPABASE_URL'),
-  def('SUPABASE_ANON_KEY'),
-].join(' ');
+const defines = {
+  'process.env.GROQ_API_KEY': JSON.stringify(parsed['GROQ_API_KEY'] ?? ''),
+  'process.env.SUPABASE_URL': JSON.stringify(parsed['SUPABASE_URL'] ?? ''),
+  'process.env.SUPABASE_ANON_KEY': JSON.stringify(parsed['SUPABASE_ANON_KEY'] ?? ''),
+};
 
 const externalList = [
   'better-sqlite3',
@@ -39,26 +33,9 @@ const externalList = [
   '@nut-tree-fork/provider-interfaces',
 ];
 
-const externals = [
-  '--external:better-sqlite3',
-  '--external:trash',
-  '--external:@nut-tree-fork/nut-js',
-  '--external:@nut-tree-fork/shared',
-  '--external:@nut-tree-fork/provider-interfaces',
-  '--alias:react-devtools-core=./src/stubs/devtools-stub.js',
-].join(' ');
-
-// ESM bundle — used at dev/runtime via `node dist/index.js`
-const esmCmd = [
-  'esbuild src/index.tsx',
-  '--bundle',
-  '--platform=node',
-  '--format=esm',
-  '--outfile=dist/index.js',
-  externals,
-  `--banner:js="import{createRequire}from'module';const require=createRequire(import.meta.url);"`,
-  defines,
-].join(' ');
+const aliases = {
+  'react-devtools-core': './src/stubs/devtools-stub.js',
+};
 
 // CJS bundle — used as the Node.js SEA entry (SEA only supports CJS).
 // Top-level await is wrapped in an async IIFE via banner/footer.
@@ -67,4 +44,16 @@ copyFileSync(resolve(root, 'src/sea-entry.cjs'), resolve(root, 'dist/sea-entry.c
 console.log('  ✔  dist/sea-entry.cjs (SEA bootstrap) copied');
 
 console.log('▸ Bundling with secrets injected from .env…');
-execSync(esmCmd, { stdio: 'inherit', cwd: root });
+await esbuild.build({
+  entryPoints: [resolve(root, 'src/index.tsx')],
+  bundle: true,
+  platform: 'node',
+  format: 'esm',
+  outfile: resolve(root, 'dist/index.js'),
+  external: externalList,
+  alias: aliases,
+  banner: {
+    js: "import{createRequire}from'module';const require=createRequire(import.meta.url);",
+  },
+  define: defines,
+});

@@ -2,7 +2,7 @@
 import React, { useState, useCallback, useRef } from 'react';
 import { Box, Text, useInput, useApp, type Key } from 'ink';
 import Header from './components/Header.js';
-import MessageList, { type Message } from './components/MessageList.js';
+import MessageList, { type Message, type MessageRole } from './components/MessageList.js';
 import InputBar from './components/InputBar.js';
 import StatusBar from './components/StatusBar.js';
 import { Engine } from '../execution/engine.js';
@@ -33,18 +33,46 @@ const WELCOME_MESSAGES: Message[] = [
   },
 ];
 
-type Props = { isAuthenticated: boolean; onRequestAuth?: (choice: 'signup' | 'login' | 'google') => void };
+type Props = { isAuthenticated: boolean; sessionId?: string; onRequestAuth?: (choice: 'signup' | 'login' | 'google') => void };
 
-export default function App({ isAuthenticated, onRequestAuth }: Props) {
+export default function App({ isAuthenticated, sessionId, onRequestAuth }: Props) {
   const { exit } = useApp();
 
   const [screen, setScreen]         = useState<Screen>(isAuthenticated ? 'welcome' : 'login');
-  const [messages, setMessages]     = useState<Message[]>(isAuthenticated ? WELCOME_MESSAGES : LOGIN_MESSAGES);
-  const [input, setInput]           = useState('');
-  const [isThinking, setIsThinking] = useState(false);
 
   /** Single engine instance lives for the lifetime of the app. */
-  const engineRef = useRef<Engine>(new Engine());
+  const engineRef = useRef<Engine>(new Engine(sessionId));
+
+  const initialMessages = (): Message[] => {
+    if (!isAuthenticated) return LOGIN_MESSAGES;
+    if (sessionId) {
+      const history = engineRef.current.getVisibleHistory();
+      if (history.length > 0) {
+        return [
+          {
+            id: 'resume-note',
+            role: 'system' as MessageRole,
+            content: `Session resumed — ${history.length} message${history.length !== 1 ? 's' : ''} loaded.`,
+            timestamp: new Date(),
+          },
+          ...history.map((t, i) => ({
+            id: `resume-${i}`,
+            role: t.role as MessageRole,
+            content: t.content,
+            timestamp: new Date(),
+          })),
+        ];
+      }
+    }
+    return WELCOME_MESSAGES;
+  };
+
+  const [messages, setMessages]     = useState<Message[]>(initialMessages);
+  const [input, setInput]           = useState('');
+  const [isThinking, setIsThinking] = useState(false);
+  const [expandLongMessages, setExpandLongMessages] = useState(false);
+
+  const currentSessionId = engineRef.current.id;
 
   /**
    * Command history — oldest first, matching classic shell behaviour.
@@ -83,7 +111,6 @@ export default function App({ isAuthenticated, onRequestAuth }: Props) {
       savedDraftRef.current   = '';
       return;
     }
-
     // ── History navigation ────────────────────────────────────────────────────
     if (!isThinking && key.upArrow) {
       const hist = historyRef.current;
@@ -147,6 +174,22 @@ export default function App({ isAuthenticated, onRequestAuth }: Props) {
       }
 
       // Push to history (avoid consecutive duplicates, matching bash behaviour)
+      const compactCmd = trimmed.toLowerCase();
+      if (compactCmd === 'show more' || compactCmd === 'show less') {
+        const expand = compactCmd === 'show more';
+        setExpandLongMessages(expand);
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: (Date.now() + 1).toString(),
+            role: 'system',
+            content: expand ? 'Expanded long messages.' : 'Collapsed long messages to one-line previews.',
+            timestamp: new Date(),
+          },
+        ]);
+        return;
+      }
+
       const hist = historyRef.current;
       if (hist.length === 0 || hist[hist.length - 1] !== trimmed) {
         historyRef.current = [...hist, trimmed];
@@ -166,9 +209,27 @@ export default function App({ isAuthenticated, onRequestAuth }: Props) {
       setInput('');
       setIsThinking(true);
 
+      let liveStep = 0;
+
       // Send to the Ollama engine and display the reply
       engineRef.current
-        .send(trimmed)
+        .send(trimmed, (step) => {
+          liveStep += 1;
+
+          const resultText =
+            typeof step.result === 'string'
+              ? step.result
+              : JSON.stringify(step.result);
+
+          const stepMessage: Message = {
+            id: `${Date.now()}-step-${liveStep}`,
+            role: 'system',
+            content: resultText,
+            timestamp: new Date(),
+          };
+
+          setMessages((prev) => [...prev, stepMessage]);
+        })
         .then((reply) => {
           const assistantMsg: Message = {
             id: (Date.now() + 1).toString(),
@@ -202,9 +263,9 @@ export default function App({ isAuthenticated, onRequestAuth }: Props) {
       {screen === 'login' ? (
         /* ── Login screen ── */
         <>
-          <MessageList messages={messages} isThinking={false} />
+          <MessageList messages={messages} isThinking={false} expandLongMessages={expandLongMessages} />
           <InputBar value={input} onChange={setInput} onSubmit={handleSubmit} isThinking={false} />
-          <StatusBar />
+          <StatusBar sessionId={currentSessionId} />
         </>
       ) : screen === 'welcome' ? (
         /* ── Welcome splash ── */
@@ -229,7 +290,7 @@ export default function App({ isAuthenticated, onRequestAuth }: Props) {
             onSubmit={handleSubmit}
             isThinking={isThinking}
           />
-          <StatusBar />
+          <StatusBar sessionId={currentSessionId} />
         </>
       )}
     </Box>

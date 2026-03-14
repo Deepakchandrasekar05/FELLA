@@ -58,8 +58,17 @@ const APP_ALLOWLIST: Record<string, Record<string, string[]>> = {
 
 // ── Tool ──────────────────────────────────────────────────────────────────────
 
+const APP_ALIASES: Record<string, string> = {
+  'visualstudiocode': 'vscode',
+  'vscode':           'vscode',
+  'microsoftedge':    'edge',
+  'googlechrome':     'chrome',
+  'windowsterminal':  'terminal',
+};
+
 export async function openApplication(args: Record<string, unknown>): Promise<string> {
-  const appKey   = String(args['app'] ?? '').trim().toLowerCase();
+  const rawKey = String(args['app'] ?? '').trim().toLowerCase().replace(/\s+/g, '');
+  const appKey = APP_ALIASES[rawKey] ?? rawKey;
   const filePath = args['file_path'] ? String(args['file_path']) : undefined;
 
   if (!appKey) throw new Error('openApplication: "app" argument is required');

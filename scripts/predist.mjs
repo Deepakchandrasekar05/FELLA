@@ -9,7 +9,7 @@
  */
 
 import { execSync }             from 'child_process';
-import { writeFileSync, mkdirSync } from 'fs';
+import { writeFileSync, mkdirSync, appendFileSync, copyFileSync, existsSync, cpSync } from 'fs';
 import { join, dirname }        from 'path';
 import { fileURLToPath }        from 'url';
 
@@ -43,10 +43,40 @@ execSync(`npm install --prefix dist --omit=dev --no-save ${PACKAGES}`, {
 });
 
 // Copy assets into dist/ so caxa bundles them inside the exe
-import { cpSync } from 'fs';
 const assetsDir = join(root, 'assets');
 const distAssets = join(distDir, 'assets');
 cpSync(assetsDir, distAssets, { recursive: true, force: true });
 console.log('✔  assets copied to dist/assets/');
+
+// ── Stamp cat icon onto the caxa stub BEFORE caxa appends the archive ────────
+// rcedit modifies PE resources in-place. If we stamp AFTER caxa, the appended
+// tar archive + JSON footer gets corrupted. Stamping the stub first is safe.
+if (process.platform === 'win32') {
+  const ico     = join(root, 'assets', 'FELLA_CAT.ico');
+  const rcedit  = join(root, 'node_modules', 'rcedit', 'bin', 'rcedit.exe');
+  const origStub = join(root, 'node_modules', 'caxa', 'stubs', 'stub--win32--x64');
+  const stampedStub = join(distDir, 'fella-stub.exe');
+
+  if (!existsSync(ico)) {
+    console.log('▸ Generating FELLA_CAT.ico from PNG…');
+    execSync('node scripts/gen-ico.mjs', { stdio: 'inherit', cwd: root });
+  }
+
+  console.log('▸ Stamping cat icon onto caxa stub…');
+  copyFileSync(origStub, stampedStub);
+  execSync(
+    `"${rcedit}" "${stampedStub}" --set-icon "${ico}"`,
+    { stdio: 'inherit' },
+  );
+
+  // rcedit rewrites the PE file and strips the last 14 bytes of the original
+  // stub, which are the caxa archive separator (\nCAXACAXACAXA\n).  The Go stub
+  // uses bytes.Index to find this separator and locate where the tarball starts.
+  // Without it, caxa reports "Failed to find archive" and the exe won't launch.
+  // Re-append the separator so caxa can build correctly on top of this stub.
+  appendFileSync(stampedStub, '\nCAXACAXACAXA\n', 'binary');
+
+  console.log('✔  Stub icon stamped → dist/fella-stub.exe');
+}
 
 console.log('✔  predist complete — native packages ready in dist/node_modules/');

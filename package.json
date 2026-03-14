@@ -44,7 +44,7 @@
     "caxa:win": "npm run build && caxa --input dist --output bin/fella-win.exe -- \"{{caxa}}/node_modules/.bin/node\" \"{{caxa}}/index.js\"",
     "caxa:linux": "npm run build && caxa --input dist --output bin/fella-linux -- \"{{caxa}}/node_modules/.bin/node\" \"{{caxa}}/index.js\"",
     "caxa:mac": "npm run build && caxa --input dist --output bin/fella-macos -- \"{{caxa}}/node_modules/.bin/node\" \"{{caxa}}/index.js\"",
-    "dist": "taskkill /F /IM fella-win.exe 2>nul & npm run build && caxa --input dist --output bin/fella-win.exe -- node \"{{caxa}}/run.cjs\"",
+    "dist": "taskkill /F /IM fella-win.exe 2>nul & npm run build && caxa --input dist --output bin/fella-win.exe --stub dist/fella-stub.exe -- node \"{{caxa}}/run.cjs\"",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "dependencies": {

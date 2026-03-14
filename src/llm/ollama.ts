@@ -9,16 +9,34 @@ import { OllamaJsonPayloadSchema } from './schema.js';
 const MODEL = 'llama-3.3-70b-versatile';
 
 /**
- * Built-in API key bundled at build time via esbuild --define.
- * process.env['GROQ_API_KEY'] is replaced with the literal key string
- * during bundling — no .env needed at runtime.
+ * Resolve API key lazily so dotenv-loaded values are available even though
+ * this module is imported before src/index.tsx runs dotenv.config().
+ *
+ * Note: process.env.GROQ_API_KEY may be replaced at build time by esbuild
+ * --define during dist builds. Read bracket notation first so a real runtime
+ * environment variable can override any bundled fallback value.
  */
-const BUILT_IN_API_KEY = process.env['GROQ_API_KEY'] ?? '';
+let groqClient: OpenAI | null = null;
+let groqClientKey = '';
 
-const groq = new OpenAI({
-  apiKey: BUILT_IN_API_KEY,
-  baseURL: 'https://api.groq.com/openai/v1',
-});
+function getGroqClient(): OpenAI {
+  const key = process.env['GROQ_API_KEY'] ?? process.env.GROQ_API_KEY ?? '';
+  if (!key) {
+    throw new OllamaError(
+      'GROQ_API_KEY is missing. Add it to your .env file or rebuild with bundled secrets.',
+    );
+  }
+
+  if (!groqClient || groqClientKey !== key) {
+    groqClient = new OpenAI({
+      apiKey: key,
+      baseURL: 'https://api.groq.com/openai/v1',
+    });
+    groqClientKey = key;
+  }
+
+  return groqClient;
+}
 
 /**
  * System prompt that instructs the model to ALWAYS reply with a valid JSON
@@ -98,7 +116,8 @@ const SYSTEM_PROMPT: string = [
     '     List the candidate filenames clearly and ask "Is this the file you mean?"',
     '  4. Once the user confirms, use the EXACT full path from findFile to open/move/delete the file.',
     '  5. Never guess or invent a filename. If findFile returns no results, say so and ask for more details.',
-    '  6. For destructive actions (delete, overwrite), ALWAYS confirm with the user before calling the tool.',  '7. NEVER call any tool with system directory paths: "Program Files", "Windows", "System32", "ProgramData", etc.',
+    '  6. For destructive actions (delete, overwrite), call the tool IMMEDIATELY once the user has identified the target. Do NOT ask "are you sure?" yourself — the system handles that confirmation step.',
+    '  7. NEVER call any tool with system directory paths: "Program Files", "Windows", "System32", "ProgramData", etc.',
   '   These are protected system locations. If the user asks to open or access them, respond with:',
   '   { "response": "⛔ I can\'t access system directories like Program Files, Windows, or System32 — they are protected system locations that I\'m not allowed to open or modify." }',    '',
     'COMMON TASK EXAMPLES:',
@@ -172,7 +191,7 @@ export class OllamaClient {
       }
 
       try {
-        const response = await groq.chat.completions.create({
+        const response = await getGroqClient().chat.completions.create({
           model: this.model,
           messages: [
             { role: 'system', content: SYSTEM_PROMPT },
