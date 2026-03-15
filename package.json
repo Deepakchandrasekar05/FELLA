@@ -1,6 +1,6 @@
 {
   "name": "fella-cli",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "File Exploration and Local Logic Automation — An AI-powered agentic CLI for Windows",
   "type": "module",
   "main": "dist/index.js",
