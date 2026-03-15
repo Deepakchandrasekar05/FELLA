@@ -171,7 +171,14 @@ export class MemoryStore {
 
   sessionExists(sessionId: string): boolean {
     const row = this.db
-      .prepare('select id from sessions where id = ?')
+      .prepare(
+        `select s.id
+         from sessions s
+         join session_turns t on t.session_id = s.id and t.visible = 1
+         where s.id = ?
+         group by s.id
+         having count(t.id) > 0`,
+      )
       .get(sessionId) as { id: string } | undefined;
     return row !== undefined;
   }
@@ -183,6 +190,7 @@ export class MemoryStore {
          from sessions s
          left join session_turns t on t.session_id = s.id and t.visible = 1
          group by s.id
+         having count(t.id) > 0
          order by s.last_at desc
          limit ?`,
       )

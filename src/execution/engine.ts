@@ -231,6 +231,9 @@ export class Engine {
   /** Unique identifier for this session, shown to the user. */
   private _sessionId: string;
 
+  /** Tracks whether a row exists in the sessions table for this engine. */
+  private sessionCreated: boolean;
+
   /** Index into this.history up to which turns have already been persisted. */
   private lastSavedIdx = 0;
 
@@ -244,9 +247,11 @@ export class Engine {
         content: t.content,
       }));
       this._sessionId = resumeSessionId;
+      this.sessionCreated = true;
     } else {
       this._sessionId = generateSessionId();
-      this.sessionStore.createSession(this._sessionId);
+      // Delay session row creation until we have at least one persisted turn.
+      this.sessionCreated = false;
     }
 
     this.lastSavedIdx = this.history.length;
@@ -273,6 +278,10 @@ export class Engine {
   /** Persist any new history messages added since the last checkpoint. */
   private persistDelta(): void {
     const newMessages = this.history.slice(this.lastSavedIdx);
+    if (newMessages.length > 0 && !this.sessionCreated) {
+      this.sessionStore.createSession(this._sessionId);
+      this.sessionCreated = true;
+    }
     const now = new Date().toISOString();
     for (const msg of newMessages) {
       this.sessionStore.appendTurn(

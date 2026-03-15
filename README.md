@@ -3,50 +3,134 @@
 </p>
 
 <p align="center">
-  <b>◆ File Exploration and Local Logic Automation ◆</b><br/>
-  An Agentic CLI for Windows - talk to your file system through prompts.
+  <b>File Exploration and Local Logic Automation</b><br/>
+  Agentic terminal assistant for Windows file workflows.
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/platform-Windows-blue?style=flat-square"/>
-  <img src="https://img.shields.io/badge/version-1.0.0-49b9ff?style=flat-square"/>
+  <img src="https://img.shields.io/badge/version-1.0.1-49b9ff?style=flat-square"/>
   <img src="https://img.shields.io/badge/TypeScript-5.9-3178c6?style=flat-square&logo=typescript&logoColor=white"/>
   <img src="https://img.shields.io/badge/Node.js-18%2B-339933?style=flat-square&logo=node.js&logoColor=white"/>
 </p>
 
 ---
 
-## What can FELLA do?
+## What FELLA Does
 
-Just type what you want — no commands to memorise.
+FELLA is a chat-first CLI for Windows that turns natural language into file and desktop actions.
 
-```
-organise my downloads by file type
-move report.pdf from downloads to documents
-create a folder on the desktop called Projects
+Examples:
+
+```text
+organise downloads by type
+open the latest pdf from downloads
+move report.pdf from desktop to documents
+create a folder on desktop called Projects
 open notepad
-delete old notes from desktop
 undo
 ```
 
-FELLA understands you, executes the action, and shows you the result — all inside the terminal.
+Under the hood, FELLA runs a multi-step agent loop:
+
+1. Reads your prompt
+2. Plans tool calls (search, list, move, organise, launch, screen automation)
+3. Executes tools with path guards and action policies
+4. Feeds results back to the model for next-step planning
+5. Returns a final response in the terminal
+
+Destructive operations are confirmation-gated. Organise operations run as preview-first and apply only after explicit confirmation.
 
 ---
 
-## Getting Started
+## Core Capabilities
 
-### Option 1 — Download the .exe (no Node.js required)
+### File and folder operations
 
-1. Go to the [Releases](../../releases) page and download `fella-win.exe`
-2. Double-click it, or run it from any terminal:
+- List files and folders
+- Find files by fuzzy title/name
+- Move and rename files
+- Create folders
+- Delete files/folders (with confirmation)
+
+### Organise mode
+
+Organise a directory by:
+
+- `by_type`
+- `by_category`
+- `by_date`
+- `by_size`
+- `by_extension`
+
+Optional filters include:
+
+- `last_week`
+- `last_month`
+- `last_3_months`
+- `last_year`
+- ISO date (for example `2026-02-01`)
+
+### Undo and redo
+
+- `undo`
+- `redo`
+
+Reversible operations are tracked per live session.
+
+### App launch and screen automation
+
+- Launch applications (for example Notepad, Chrome)
+- Navigate Explorer to folders/files
+- Optional UI automation actions (click/type/scroll/find text/screenshot)
+
+---
+
+## Path Safety Model
+
+FELLA enforces strict path access:
+
+- Allowed: `C:\Users\...`
+- Allowed: `D:\...`
+- Blocked: system locations such as `C:\Windows`, `C:\Program Files`, `C:\ProgramData`
+
+Friendly aliases are supported, for example:
+
+- `desktop`
+- `documents`
+- `downloads`
+- `pictures`
+- `music`
+- `videos`
+- `temp`
+- `appdata`
+- `localappdata`
+- `d:`
+
+---
+
+## Sessions and Memory
+
+FELLA persists sessions and memory to SQLite:
+
+- Database: `%USERPROFILE%\.fella\memory.db`
+- Auth token file: `%USERPROFILE%\.fella\auth.json`
+
+Session commands:
 
 ```bat
-fella-win.exe
+fella sessions
+fella resume --session_id <id>
+fella resume <id>
 ```
 
-> First launch may show a Windows SmartScreen prompt — click **More info → Run anyway**.
+Only sessions with visible messages are shown in `fella sessions`.
 
-### Option 2 — Install via npm
+---
+
+## Install and Run
+
+### Option 1: npm global install
 
 Requires [Node.js 18+](https://nodejs.org).
 
@@ -55,117 +139,122 @@ npm install -g fella-cli
 fella
 ```
 
-No API keys or config files needed — everything is bundled.
+### Option 2: Windows executable
 
----
-
-## Login
-
-When you first open FELLA, it will ask how you want to sign in. Just type one of:
-
-| What you type | What it does |
-|---|---|
-| `signup` | Create a new account with email & password |
-| `login` | Sign in with your email & password |
-| `google` | Sign in with Google (opens your browser) |
-
-After signing in, FELLA launches automatically.
+Download `fella-win.exe` from [Releases](../../releases) and run it.
 
 ```bat
-fella logout      # sign out
-fella whoami      # see who you're logged in as
+fella-win.exe
+```
+
+SmartScreen may appear on first run if the binary is unsigned.
+
+---
+
+## Authentication
+
+FELLA supports:
+
+- Email/password sign-up and login
+- Google OAuth login
+
+Useful commands:
+
+```bat
+fella signup
+fella login
+fella login --google
+fella whoami
+fella logout
 ```
 
 ---
 
-## What you can ask
+## .env Configuration
 
-### Files & Folders
+FELLA reads `.env` from these locations (first match wins):
 
-```
-list my downloads
-list files in D:\Projects
+1. `%FELLA_HOME%\.env`
+2. `<runtime_dir>\..\.env`
+3. `<current_working_directory>\.env`
 
-create a folder called MyWork on the desktop
-move budget.xlsx from desktop to documents
-rename D:\Projects\old to D:\Projects\new
-delete notes.txt from desktop
-```
+### Required keys
 
-### Organise files
-
-```
-organise my downloads by file type
-organise downloads from last week by category
-organise D:\Archive by date
+```env
+GROQ_API_KEY=your_groq_api_key
+SUPABASE_URL=https://your-project-ref.supabase.co
+SUPABASE_ANON_KEY=your_supabase_anon_key
 ```
 
-FELLA always shows a **preview first** — nothing moves until you confirm with `yes`.
+What each key is used for:
 
-**Sort by:** `type` · `category` · `date` · `size` · `extension`  
-**Filter by:** `last_week` · `last_month` · `last_3_months` · `last_year`
+- `GROQ_API_KEY`: LLM chat completions via Groq OpenAI-compatible API
+- `SUPABASE_URL`: Supabase project URL for auth
+- `SUPABASE_ANON_KEY`: Supabase public anon key for auth flows
 
-### Undo anything
+### Optional keys
 
-```
-undo
-redo
-```
-
-Every file action is fully reversible for the lifetime of your session.
-
-### Launch apps
-
-```
-open notepad
-launch chrome
-start visual studio code
-open calculator
+```env
+FELLA_MOCK=1
+FELLA_HOME=D:\path\to\fella
 ```
 
-### Screen automation
+- `FELLA_MOCK=1`: bypasses model calls and returns mock responses for testing
+- `FELLA_HOME`: helps packaged launchers resolve a fixed `.env` location
 
-```
-take a screenshot
-click on the Save button
-type Hello World
-press ctrl+s
-scroll down
-find the text "OK" on screen
-```
+Notes:
+
+- Build scripts can inject env values into dist bundles during packaging.
+- Runtime env vars still take precedence when present.
 
 ---
 
-## Keyboard shortcuts
+## Keyboard Shortcuts
 
 | Key | Action |
 |---|---|
 | `Enter` | Send message |
-| `↑` / `↓` | Browse previous commands |
+| `Up` / `Down` | Browse previous commands |
 | `Ctrl + L` | Clear conversation |
 | `Ctrl + C` | Exit |
 
 ---
 
-## Folder shortcuts
+## Development
 
-You can use friendly names instead of full paths:
+```bat
+npm install
+npm run typecheck
+npm run build
+```
 
-`desktop` · `documents` · `downloads` · `pictures` · `music` · `videos` · `temp` · `appdata` · `d:`
+Selected scripts:
+
+- `npm run typecheck` - TypeScript type check
+- `npm run build` - typecheck + bundle
+- `npm run sea` - build SEA artifact path
+- `npm run dist` - build Windows distribution executable
 
 ---
 
 ## Troubleshooting
 
-**SmartScreen blocks the .exe**
-Click **More info → Run anyway**. This happens because the binary isn't code-signed yet.
+### No sessions shown
 
-**Organise shows "No files found"**
-Your folder may be empty, or the time filter is too narrow. Try without a filter: `organise downloads by type`
+- Run `fella sessions`
+- A session appears only after visible messages exist
 
-**Undo says "folder is not empty"**
-Add files were added to the folder after it was created. Empty it first, then undo.
+### Login fails immediately
 
-**Screen clicks / OCR not working**
-App launching and folder navigation always work. Advanced screen features (click, OCR, screenshot) require the native nut-js addon to be present alongside the binary.
+- Verify `SUPABASE_URL` and `SUPABASE_ANON_KEY` in `.env`
+
+### Model call fails
+
+- Verify `GROQ_API_KEY`
+- Confirm outbound network access to Groq API
+
+### Automation actions fail
+
+- Ensure native dependencies are present for screen automation features
+- App launch and Explorer navigation remain available even when advanced UI actions are limited
 
