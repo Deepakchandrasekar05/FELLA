@@ -1,520 +1,909 @@
-# FELLA CLI — Developer Guide
+# FELLA CLI — Implementation Guide
 
-**File Exploration and Local Logic Automation**  
-An agentic, AI-powered command-line tool that lets you control the Windows file system using natural language.
+File Exploration and Local Logic Automation.
 
----
-
-## Table of Contents
-
-1. [What is Fella?](#what-is-fella)
-2. [Tech Stack](#tech-stack)
-3. [Project Structure](#project-structure)
-4. [Architecture Overview](#architecture-overview)
-5. [Module-by-Module Implementation](#module-by-module-implementation)
-   - [Entry Point](#entry-point)
-   - [Authentication](#authentication)
-   - [UI Layer (Ink / React)](#ui-layer-ink--react)
-  - [Agent Loop & Memory](#agent-loop--memory)
-   - [Execution Engine](#execution-engine)
-   - [LLM Layer (Groq)](#llm-layer-groq)
-   - [Tools](#tools)
-   - [Security (Path Guard)](#security-path-guard)
-6. [Build System](#build-system)
-7. [Distribution & Icon Stamping](#distribution--icon-stamping)
-8. [Environment Variables](#environment-variables)
-9. [Available npm Scripts](#available-npm-scripts)
-10. [Keyboard Shortcuts](#keyboard-shortcuts)
+This guide explains how the current codebase works end to end: startup flow, auth, UI, engine, tool routing, persistence, build pipeline, and environment configuration. It documents the implementation that exists now in the repository.
 
 ---
 
-## What is Fella?
+## 1. What FELLA Is
 
-Fella is a terminal-based AI assistant that accepts natural-language commands and translates them into file-system actions. The user types something like *"open the recent pdf from the OOPS folder in D drive"* and Fella:
+FELLA is a Windows-first terminal assistant that accepts natural-language requests and turns them into:
 
-1. Sends the message to Groq's API (llama-3.3-70b-versatile)
-2. Receives a structured JSON tool-call from the model
-3. Executes the appropriate tool (e.g. `findFile` → `screenAutomation`)
-4. Injects the tool result back into the conversation so the model can plan the next step
-5. Continues up to 8 tool-call iterations until the task is complete
-6. Renders the final result back in the terminal
+- file-system actions
+- Windows Explorer navigation
+- app launches
+- screen automation actions
+- Windows Settings and Control Panel navigation
 
-The engine is fully agentic — it plans multi-step tasks, confirms destructive operations, and never guesses file paths.
+The app is not a generic shell wrapper. The main behavior is agentic:
 
----
-
-## Tech Stack
-
-| Layer | Technology | Version | Purpose |
-|---|---|---|---|
-| **Language** | TypeScript | `^5.9` | Strict, type-safe source code |
-| **Runtime** | Node.js | ≥ 18 | ESM runtime, native `fetch` |
-| **Terminal UI** | [Ink](https://github.com/vadimdemedes/ink) | `^6.8` | React-based terminal rendering |
-| **UI Framework** | React | `^19.2` | Component model inside Ink |
-| **Text Input** | [ink-text-input](https://github.com/vadimdemedes/ink-text-input) | `^6.0` | Controlled input field in the terminal |
-| **Spinner** | [ink-spinner](https://github.com/vadimdemedes/ink-spinner) | `^5.0` | Animated thinking indicator |
-| **LLM Backend** | [Groq](https://groq.com/) | cloud API | llama-3.3-70b-versatile via OpenAI-compatible API |
-| **Auth** | [Supabase](https://supabase.com/) | `^2.98` | Email/password + Google OAuth with PKCE flow |
-| **Schema Validation** | [Zod](https://zod.dev/) | `^4.3` | Runtime validation of all API payloads |
-| **Process Spawning** | [execa](https://github.com/sindresorhus/execa) | `^9.6` | Safe cross-platform process execution |
-| **Database** | [better-sqlite3](https://github.com/WiseLibs/better-sqlite3) | `^12.6` | Cross-session memory store in `~/.fella/memory.db` |
-| **Screen Automation** | [@nut-tree-fork/nut-js](https://nutjs.dev/) | `^4.2` | Mouse, keyboard, OCR-based screen control |
-| **Env Loading** | [dotenv](https://github.com/motdotla/dotenv) | `^17.3` | `.env` loading with multiple candidate paths |
-| **Safe Delete** | [trash](https://github.com/sindresorhus/trash) | `^10.1` | Sends files to the OS recycle bin |
-| **Bundler** | [esbuild](https://esbuild.github.io/) | `^0.25` | Fast ESM bundle for distribution |
-| **Type Checker** | TypeScript `tsc` | `^5.9` | Type-check only (`noEmit: true`) |
-| **Distribution** | [caxa](https://github.com/nicolo-ribaudo/caxa) | `^3.0` | Self-contained Windows exe (bundles Node.js) |
-| **Icon Stamping** | [rcedit](https://github.com/electron/rcedit) | `^1.1` | Embeds `.ico` into the caxa stub PE |
-| **Dev Runner** | [tsx](https://github.com/esbuild-kit/tsx) | `^4.21` | Run TypeScript directly for development |
+1. The user types a request in the Ink terminal UI.
+2. The execution engine decides whether the request can be handled by a deterministic shortcut path.
+3. If not, the request goes through the LLM agent loop.
+4. The model emits either a final response or a structured tool call.
+5. Tools execute inside policy constraints.
+6. Tool results are fed back into the model until the task is complete.
+7. Visible conversation turns are persisted as a resumable session.
 
 ---
 
-## Project Structure
+## 2. Runtime Stack
 
-```
-fella/
-├── assets/
-│   ├── FELLA_CAT.png           # Source logo image
-│   ├── FELLA_CAT.ico           # Generated .ico (via scripts/gen-ico.mjs)
-│   └── logo.png                # README banner
-├── bin/
-│   └── fella-win.exe           # Built Windows executable (generated, not committed)
-├── dist/                       # esbuild + caxa build output (generated)
-│   ├── index.js                # Bundled ESM entry
-│   ├── run.cjs                 # CJS wrapper for caxa
-│   ├── fella-stub.exe          # Icon-stamped caxa stub (generated in predist)
-│   └── node_modules/           # Native modules bundled for caxa
-├── scripts/
-│   ├── bundle.mjs              # esbuild invocation
-│   ├── postbundle.mjs          # Writes CJS wrapper + prepends shebang
-│   ├── predist.mjs             # Installs native modules, stamps icon on caxa stub
-│   ├── postdist.mjs            # Optional post-dist icon/version stamping helper
-│   ├── gen-ico.mjs             # Converts FELLA_CAT.png → multi-size .ico
-│   └── sea.mjs                 # Node.js SEA binary builder (alternative path)
-├── src/
-│   ├── index.tsx               # Entry point — dotenv, auth CLI, launches TUI
-│   ├── agent/
-│   │   └── loop.ts             # ReAct loop state machine (THINK → ACT → OBSERVE)
-│   ├── auth/
-│   │   ├── client.ts           # Lazy Supabase client (Proxy) + token storage
-│   │   ├── commands.ts         # login, logout, signup, whoami, loginWithGoogle CLI commands
-│   │   ├── email.ts            # Email/password sign-in and sign-up flows
-│   │   ├── google.ts           # Google OAuth with PKCE + local callback server
-│   │   ├── session.ts          # Token persistence in ~/.fella/auth.json
-│   │   └── supabase.ts         # Lazy getSupabase() helper
-│   ├── execution/
-│   │   ├── engine.ts           # Stateful agentic conversation engine
-│   │   └── history.ts          # Undo/Redo stack
-│   ├── llm/
-│   │   ├── client.ts           # LLM adapter consumed by AgentLoop
-│   │   ├── ollama.ts           # Groq API client + full system prompt
-│   │   └── schema.ts           # Zod schemas for all LLM API types + TOOL_NAMES
-│   ├── memory/
-│   │   ├── context.ts          # Goal-aware context loader (guide + recall + facts)
-│   │   └── store.ts            # SQLite memory store (save/recall/facts)
-│   ├── persistence/
-│   │   └── audit.ts            # Reserved for future audit logging
-│   ├── security/
-│   │   ├── pathGuard.ts        # Path alias resolution, access policy, system dir block
-│   │   └── validator.ts        # Input validation helpers
-│   ├── stubs/
-│   │   └── devtools-stub.js    # No-op stub replacing react-devtools-core in prod
-│   ├── tools/
-│   │   ├── registry.ts         # Tool dispatch table + alias resolution
-│   │   ├── findFile.ts         # Fuzzy recursive file search with two-pass junk filtering
-│   │   ├── createDirectory.ts  # mkdir -p wrapper
-│   │   ├── deleteFile.ts       # Soft-delete via trash staging area
-│   │   ├── listFiles.ts        # readdir wrapper
-│   │   ├── moveFile.ts         # rename wrapper (no silent overwrites)
-│   │   ├── openApplication.ts  # Legacy app launcher (delegates to screenAutomation)
-│   │   ├── organiseByRule.ts   # Batch file organiser (dry-run + execute)
-│   │   └── screenAutomation.ts # Mouse, keyboard, navigate, launch via nut-js + PowerShell
-│   └── ui/
-│       ├── App.tsx             # Root component — auth gate, screen routing, state
-│       └── components/
-│           ├── Header.tsx      # ASCII-art FELLA logo + version badges
-│           ├── InputBar.tsx    # Prompt glyph + TextInput
-│           ├── MessageList.tsx # Scrollable conversation thread
-│           └── StatusBar.tsx   # Keyboard shortcut hints
-├── sea-config.json             # Node.js SEA blob configuration
-├── tsconfig.json               # TypeScript configuration
-└── package.json                # Dependencies and npm scripts
+The current stack is:
+
+- TypeScript for source code
+- Node.js 18+ as runtime
+- Ink + React for terminal UI
+- OpenAI SDK pointed at Groq's OpenAI-compatible endpoint
+- Supabase for authentication
+- better-sqlite3 for local persistence
+- execa for process spawning
+- nut-js for OCR, mouse, and keyboard automation
+- esbuild for bundling
+- caxa for Windows packaging
+
+---
+
+## 3. High-Level Architecture
+
+The main runtime path is:
+
+```text
+CLI startup
+  -> src/index.tsx
+  -> dotenv resolution
+  -> auth command handling or TUI launch
+  -> src/ui/App.tsx
+  -> src/execution/engine.ts
+  -> shortcut bypass OR src/agent/loop.ts
+  -> src/tools/registry.ts
+  -> concrete tool implementation
+  -> result back to UI and session storage
 ```
 
----
+There are four main layers:
 
-## Architecture Overview
-
-```
-User Input (keyboard)
-        │
-        ▼
-  ┌─────────────┐    auth gate    ┌─────────────────────┐
-  │  index.tsx  │ ──────────────► │  Supabase Auth       │
-  │  (entry)    │                 │  email / Google PKCE │
-  └──────┬──────┘                 └─────────────────────┘
-         │ render(<App />)
-         ▼
-  ┌─────────────┐
-  │  Ink / React│  src/ui/ — renders to stdout via Ink
-  │  App.tsx    │
-  └──────┬──────┘
-         │ handleSubmit()
-         ▼
-  ┌──────────────────────────────────────────────────────┐
-  │  Engine  (src/execution/engine.ts)                   │
-  │                                                      │
-  │  ┌─────────────────────────────────────────────────┐ │
-  │  │              Agentic Loop (max 8 steps)         │ │
-  │  │                                                 │ │
-  │  │  history ──► Groq API ──► payload               │ │
-  │  │                               │                 │ │
-  │  │              tool call?  ◄────┤                 │ │
-  │  │                  │            │                 │ │
-  │  │           executeTool()   response?             │ │
-  │  │                  │            │                 │ │
-  │  │        [Tool result] ──►      │                 │ │
-  │  │         push to history       │                 │ │
-  │  │         continue loop    return to user         │ │
-  │  └─────────────────────────────────────────────────┘ │
-  └──────────────────────────────────────────────────────┘
-         │
-         ▼
-  ┌─────────────────────────────────────────────────────┐
-  │  Tool Registry  (src/tools/registry.ts)             │
-  │                                                     │
-  │  findFile | listFiles | deleteFile | moveFile       │
-  │  createDirectory | organiseByRule | screenAutomation│
-  └──────────────────────────────────────────────────────┘
-         │
-         ▼
-  ┌─────────────────────────────────────────────────────┐
-  │  pathGuard.ts                                       │
-  │  alias → absolute path                              │
-  │  system dir block (Windows, Program Files, etc.)    │
-  │  zone check (C:\Users\ or D:\ only)                 │
-  └─────────────────────────────────────────────────────┘
-```
+1. Entry and auth layer
+2. Terminal UI layer
+3. Execution engine and agent loop
+4. Tooling, storage, and safety layer
 
 ---
 
-## Module-by-Module Implementation
+## 4. Project Structure
 
-### Entry Point
+Important files and folders:
 
-**`src/index.tsx`**
+```text
+src/
+  index.tsx                  Entry point and CLI command routing
+  sea-entry.cjs              SEA bootstrap entry
 
-The entry point loads environment variables, handles auth CLI sub-commands, then either boots the TUI directly (if already authenticated) or shows the auth screen.
+  agent/
+    loop.ts                  Multi-step agent loop
 
-**Environment loading — three candidates in priority order:**
-1. `$FELLA_HOME/.env` — set by `fella.bat` to point at the install directory; ensures the bundled exe finds its `.env` at runtime regardless of cwd
-2. `dist/../.env` — relative to the real script path; works during development
-3. `cwd/.env` — last-resort fallback
+  auth/
+    client.ts                Lazy Supabase client and auth token storage
+    commands.ts              signup/login/logout/google/whoami commands
+    email.ts                 Email auth helpers
+    google.ts                OAuth flow and callback server
+    session.ts               Auth-related persistence helpers
+    supabase.ts              Alternate lazy client helper
 
-`dotenv.config({ quiet: true })` is used to suppress the dotenv version banner.
+  execution/
+    engine.ts                Main conversation engine and shortcut routing
+    history.ts               Undo/redo stack
 
-**Auth CLI sub-commands:**
+  llm/
+    client.ts                Thin adapter around the Groq client
+    ollama.ts                Groq request layer and system prompt
+    schema.ts                Zod schemas and allowed tool names
 
-| Argument | Behaviour |
-|---|---|
-| `signup` | Runs interactive email/password sign-up, then exits |
-| `login` | Runs interactive email/password sign-in, then falls through to TUI |
-| `login --google` | Runs Google OAuth, then falls through to TUI |
-| `logout` | Clears stored token, exits |
-| `whoami` | Prints the currently logged-in email, exits |
+  memory/
+    context.ts               Loads guide + recall + facts as extra context
+    store.ts                 SQLite persistence for memory and sessions
 
-After `login` or `login --google` the process does **not** exit — it falls through and renders `<App />` immediately so the user lands in the chat screen.
+  security/
+    pathGuard.ts             Alias resolution and path allow/block policy
+    validator.ts             Input validation helpers
 
-**Auth gate loop:** if no valid token exists at startup, renders the unauthenticated `<App />` which displays login options. Once the user chooses a method and authenticates, the loop re-runs `refreshIfNeeded()` and renders the authenticated TUI.
+  tools/
+    registry.ts              Tool registry and alias mapping
+    createDirectory.ts       Create folder tool
+    deleteFile.ts            Delete tool
+    findFile.ts              Fuzzy file search
+    listFiles.ts             Directory listing
+    moveFile.ts              Move/rename tool
+    openApplication.ts       Legacy app launcher
+    openSettings.ts          Windows Settings and Control Panel launcher
+    organiseByRule.ts        File organisation planner/executor
+    screenAutomation.ts      GUI automation and Explorer/app navigation
 
----
-
-### Authentication
-
-#### `src/auth/client.ts` — Lazy Supabase Client
-
-Supabase reads `SUPABASE_URL` and `SUPABASE_ANON_KEY` from `process.env`. Because ES module top-level imports are hoisted and run before `dotenv.config()`, a naive `createClient(process.env.SUPABASE_URL, ...)` at module level would always receive `undefined`.
-
-The fix is **lazy initialisation via a `Proxy`**:
-
-```ts
-let _client: ReturnType<typeof createClient> | null = null;
-
-function getClient() {
-  if (!_client) {
-    const url = process.env['SUPABASE_URL'];
-    const key = process.env['SUPABASE_ANON_KEY'];
-    if (!url || !key) throw new Error('SUPABASE_URL / SUPABASE_ANON_KEY not set');
-    _client = createClient(url, key, {
-      auth: {
-        flowType: 'pkce',        // required for Google OAuth
-        persistSession: false,
-        autoRefreshToken: false,
-        detectSessionInUrl: false,
-      },
-    });
-  }
-  return _client;
-}
-
-export const supabase = new Proxy({} as ReturnType<typeof createClient>, {
-  get(_, prop) { return Reflect.get(getClient(), prop); },
-});
+  ui/
+    App.tsx                  Root Ink app
+    components/
+      Header.tsx             Branding header
+      InputBar.tsx           Terminal input
+      MessageList.tsx        Message renderer
+      StatusBar.tsx          Shortcut hints and session id
 ```
 
-`flowType: 'pkce'` is required for Google OAuth to work. Without it the callback URL does not carry an auth code and the sign-in fails with "No auth code received".
+Generated/runtime outputs:
 
-#### `src/auth/google.ts` — Google OAuth (PKCE)
-
-1. Generates a Supabase OAuth URL with `redirectTo: 'http://localhost:54321/callback'`
-2. Spins up a temporary `http.createServer` on port 54321
-3. Opens the URL in the default browser via `execa('cmd', ['/c', 'start', url])`
-4. The server captures the callback, exchanges the auth code for a session via Supabase, stores the token in `~/.fella/auth.json`, and tears itself down
-
-#### `src/auth/session.ts` — Token Persistence
-
-Tokens are stored at `~/.fella/auth.json`. `refreshIfNeeded()` reads the file, checks the expiry, calls `supabase.auth.refreshSession()` if within 60 seconds of expiry, and writes the new token back.
+- dist/ contains bundled app artifacts
+- bin/fella-win.exe is the packaged Windows executable
+- %USERPROFILE%\.fella\memory.db stores sessions and memory
+- %USERPROFILE%\.fella\auth.json stores auth tokens
 
 ---
 
-### UI Layer (Ink / React)
+## 5. Startup Flow
 
-Ink renders React component trees to the terminal using Yoga (flexbox layout engine). All standard React hooks work.
+The app starts in src/index.tsx.
 
-#### `App.tsx` — Root Component
+### 5.1 .env resolution
 
-Top-level state:
+The app tries these .env locations in order:
 
-| State | Type | Purpose |
-|---|---|---|
-| `screen` | `'welcome' \| 'chat'` | Controls which screen is shown |
-| `messages` | `Message[]` | Full conversation history for display |
-| `input` | `string` | Current text-input value |
-| `isThinking` | `boolean` | Locks input while awaiting the model |
-| `engineRef` | `Ref<Engine>` | Single long-lived conversation engine |
+1. `%FELLA_HOME%\.env`
+2. `<runtime_dir>\..\.env`
+3. `<cwd>\.env`
 
-**Screen flow:**
-- On launch → `welcome` screen (logo + "Press Enter to continue")
-- Bare `Enter` → transitions to `chat` screen (handled by `useInput`)
-- `ctrl+c` → exits at any time
-- `ctrl+l` → clears messages and resets the engine history
+It loads the first one that exists using dotenv with `override: true`.
 
-`InputBar` and `StatusBar` are only rendered on the `chat` screen — the welcome screen hides the input field so users cannot type before pressing Enter.
+This supports:
 
-**`handleSubmit()`** appends the user message to `messages`, calls `engine.send()`, streams step events in real time, then appends the assistant reply (or an error) when the promise resolves.
+- local source execution
+- bundled dist execution
+- packaged executable execution
 
-The chat now renders live system updates in this format:
-- `Step N -> THINK: ...`
-- `Step N -> ACT: tool(args)`
-- `Step N -> OBSERVE: result`
+### 5.2 CLI command handling
 
-These messages come from the `onStep` callback emitted by the ReAct loop.
+Before the TUI starts, index.tsx handles these commands directly:
 
-#### `Header.tsx`
+- `fella signup`
+- `fella login`
+- `fella login --google`
+- `fella logout`
+- `fella whoami`
+- `fella sessions`
+- `fella resume --session_id <id>`
+- `fella resume <id>`
 
-Renders the ASCII-art FELLA logo box-drawing art, subtitle, and version/badge pills.
+If the command is `sessions`, the app reads local SQLite session summaries and exits.
 
-#### `MessageList.tsx`
+If the command is `resume`, it validates that the session exists and contains visible turns before launching the UI with that session id.
 
-Renders the conversation thread. Each `Message` has role, content, and timestamp.
+### 5.3 Auth gate loop
 
-| Role | Glyph | Colour |
-|---|---|---|
-| `user` | `❯` | `#6CB6FF` (blue) |
-| `assistant` | `◆` | `#E8865A` (orange) |
-| `system` | `·` | `#555555` (dim grey) |
-| `error` | `✕` | `#FF6B6B` (red) |
-
-While `isThinking` is true a `<Spinner>` with "thinking…" is appended.
-
-#### `InputBar.tsx`
-
-Renders the `❯` prompt glyph and an `ink-text-input` controlled by `App`'s `input` state. While `isThinking` is true the input is replaced with a greyed-out "waiting for response…" label.
-
-#### `StatusBar.tsx`
-
-Fixed row of keyboard-shortcut hints: `ctrl+c → exit`, `ctrl+l → clear`, `enter → send`.
+If no valid token is available, the app renders a login-mode UI first. After successful auth, it re-checks token validity and then renders the main authenticated app.
 
 ---
 
-### Agent Loop & Memory
+## 6. Authentication Implementation
 
-#### `src/agent/loop.ts` — ReAct Orchestrator
+Auth is implemented with Supabase.
 
-`AgentLoop` now owns the tool-use reasoning cycle:
+### 6.1 Lazy client initialization
 
-1. Builds state (`goal`, `messages`, `steps`, `stepCount`, `maxSteps`)
-2. Injects cross-session context with `ContextLoader.load(userInput)`
-3. Repeats THINK → ACT → OBSERVE until completion or step limit
-4. Emits each executed step via `onStep(step)` for live UI rendering
-5. Persists the run via `MemoryStore.save(...)`
+The main client is in src/auth/client.ts.
 
-The loop supports pluggable execution policy through `executeTool(...)`, which the engine uses to enforce confirmations for destructive actions.
+The Supabase client is created lazily because ESM imports happen before dotenv has loaded environment values. The module exposes a Proxy so callers can still write `supabase.auth...` normally.
 
-#### `src/memory/store.ts` — SQLite Memory
+Required env keys:
 
-Memory is persisted in `~/.fella/memory.db` using two tables:
+- `SUPABASE_URL`
+- `SUPABASE_ANON_KEY`
 
-- `memory`: stores completed runs (`goal`, serialized `steps`, `timestamp`)
-- `facts`: stores persistent user facts (`fact`, `source`, `timestamp`)
+If either is missing, the process exits with an explicit configuration error.
 
-Implemented methods:
+### 6.2 Token storage
 
-1. `save(entry)` stores each run
-2. `recall(currentGoal, limit)` returns relevant past runs using keyword matching
-3. `saveFact(fact, source)` stores long-lived facts
-4. `getFacts()` returns facts for context injection
+Tokens are stored at:
 
-#### `src/memory/context.ts` — Goal-Aware Context Loader
+- `%USERPROFILE%\.fella\auth.json`
 
-`ContextLoader.load(currentGoal)` combines:
+Stored fields include:
 
-1. Project guide context (`FELLA.md`/`GUIDE.md` candidates)
-2. Relevant recalled actions from `MemoryStore.recall(...)`
-3. Persistent facts from `MemoryStore.getFacts()`
+- access token
+- refresh token
+- user email
+- user id
+- expiry timestamp
 
-This gives FELLA continuity across app restarts while still using in-session chat history for short-term context.
+refreshIfNeeded() refreshes the session if the token is near expiry.
+
+### 6.3 Email login and signup
+
+src/auth/commands.ts implements:
+
+- signup
+- login
+- logout
+- whoami
+
+Email/password input is collected through readline, with masked password entry for terminal usage.
+
+### 6.4 Google OAuth login
+
+Google login uses a temporary localhost callback server on port 54321.
+
+Flow:
+
+1. Start HTTP server.
+2. Ask Supabase for OAuth URL.
+3. Open browser.
+4. Receive callback with auth code.
+5. Exchange code for session.
+6. Save auth token locally.
+7. Close callback server.
+
+PKCE mode is required for this flow.
 
 ---
 
-### Execution Engine
+## 7. UI Layer
 
-**`src/execution/engine.ts`** — `class Engine`
+The terminal UI is implemented with Ink and React.
 
-One instance per session, created via `useRef` in `App.tsx`.
+### 7.1 App state
 
-#### State
+src/ui/App.tsx owns:
 
-| Field | Type | Purpose |
-|---|---|---|
-| `history` | `OllamaMessage[]` | Rolling chat history sent to Groq on every turn |
-| `pendingConfirmation` | `PendingConfirmation \| null` | Destructive tool call awaiting yes/no |
-| `undoStack` | `UndoStack` | Reversible operations for undo/redo |
+- current screen (`login`, `welcome`, `chat`)
+- rendered messages
+- text input state
+- thinking state
+- expand/collapse state for long messages
+- command history navigation state
+- one long-lived Engine instance
 
-#### `send(userMessage, onStep?)` — Full Flow
+### 7.2 Screen modes
 
-1. **Undo/Redo bypass** — regex matches `"undo"` / `"redo"` variants and delegates to `undoStack` without touching the LLM
-2. **Confirmation gate** — if `pendingConfirmation` is set, check whether the message is a confirm or cancel word. If yes → execute the stored tool. If no → cancel with "Cancelled — no changes were made."
-3. **Keyword bypasses** — a small set of unambiguous patterns are handled without the LLM:
-   - `"create a folder on X called Y"` → directly calls `createDirectory`
-   - `"navigate to X"` / `"go to X"` (simple known folder aliases only) → directly calls `screenAutomation navigate`
-   - `"open the last downloaded <type>"` → directly scans the Downloads folder sorted by mtime
-4. **ReAct delegation** — calls `AgentLoop.run(userMessage, history, onStep)`
-   - engine supplies the execution policy hook (`executeAgentTool`)
-   - delete/organise confirmations are enforced before destructive actions
-   - emitted steps are forwarded to the UI through `onStep`
-   - normalized loop messages are written back to `history`
-5. **`executeWithHistory()`** wraps every tool call with undo recording:
-   - `deleteFile` → soft-delete: moves file to `%TEMP%/.fella-trash/<timestamp>_<name>` and records an undo that moves it back
-   - `moveFile` → records inverse rename as undo
-   - `createDirectory` → records non-recursive `rmdir` as undo (only succeeds if folder is still empty)
-   - `organiseByRule` → captures the exact list of moves made and records them individually
+There are three screens:
 
-#### `src/execution/history.ts` — Undo/Redo Stack
+1. `login`
+2. `welcome`
+3. `chat`
 
-```ts
-interface HistoryEntry {
-  description: string;
-  undo: () => Promise<void>;
-  redo: () => Promise<void>;
-}
+Login screen renders auth guidance.
+
+Welcome screen appears after successful auth and waits for Enter.
+
+Chat screen renders:
+
+- conversation
+- input bar
+- status bar
+
+### 7.3 Keyboard behavior
+
+Current shortcuts include:
+
+- `Ctrl+C` exit
+- `Ctrl+L` clear conversation and reset engine state
+- `Ctrl+M` expand/collapse long messages
+- `Up` and `Down` navigate command history
+
+### 7.4 Message rendering
+
+src/ui/components/MessageList.tsx renders messages by role:
+
+- `user`
+- `assistant`
+- `system`
+- `error`
+
+Long assistant/system messages are collapsed by default. Expansion is controlled globally for the view.
+
+Important detail:
+
+- the `show more` / `show less` text is not a mouse-click button
+- expansion works through the command text or `Ctrl+M`
+
+### 7.5 Step streaming
+
+When the agent loop executes tools, intermediate tool results are rendered as `system` messages in real time through the `onStep` callback.
+
+---
+
+## 8. Execution Engine
+
+The central runtime logic is in src/execution/engine.ts.
+
+Engine responsibilities:
+
+- own the conversation history for the current session
+- handle deterministic command bypasses
+- mediate confirmation flows
+- maintain undo/redo history
+- call the agent loop for multi-step reasoning
+- persist visible turns into SQLite
+
+### 8.1 Engine state
+
+Important fields:
+
+- `history`: rolling LLM conversation state
+- `pendingConfirmation`: destructive action waiting for yes/no
+- `pendingSelection`: disambiguation state for folder choices
+- `undoStack`: reversible action history
+- `sessionStore`: SQLite persistence layer
+- `_sessionId`: current session id
+- `sessionCreated`: whether this session has been persisted yet
+- `lastSavedIdx`: last persisted history index
+
+### 8.2 Session creation behavior
+
+Sessions are created lazily.
+
+This is important because older behavior created empty session rows on startup. Now a session row is only created once there is at least one turn to persist.
+
+Only sessions with visible turns are considered resumable and shown in `fella sessions`.
+
+### 8.3 send() flow
+
+Engine.send() wraps sendInner() and always persists history delta afterward.
+
+sendInner() processes requests in this order:
+
+1. undo/redo bypass
+2. bare acknowledgement bypass
+3. pending selection handling
+4. folder navigation shortcut
+5. folder deletion shortcut
+6. folder creation shortcut
+7. simple navigation shortcut
+8. latest-download shortcut
+9. settings/control-panel shortcut
+10. generic app-launch shortcut
+11. confirmation gate
+12. mock mode
+13. agent loop
+
+That ordering is intentional. For example, settings phrases must be intercepted before the generic `open <something>` app launcher.
+
+### 8.4 Acknowledgement handling
+
+Simple acknowledgements like `ok`, `okay`, `got it`, `thanks` are handled directly so the LLM does not repeat previous explanations unnecessarily.
+
+If a confirmation is pending, `okay` is treated as confirmation.
+
+### 8.5 Confirmation handling
+
+Destructive actions are not executed immediately without a confirmation path.
+
+Current confirmation words include values like:
+
+- yes
+- y
+- confirm
+- do it
+- proceed
+- ok
+- okay
+- sure
+
+Cancel words include:
+
+- no
+- cancel
+- stop
+- abort
+
+### 8.6 Undo/redo implementation
+
+The undo stack is in src/execution/history.ts.
+
+It stores reversible entries with:
+
+- description
+- undo function
+- redo function
+
+The engine records undo information for:
+
+- file moves and renames
+- folder creation
+- file organization moves
+- file deletion through its trash-move strategy
+
+### 8.7 Persistence of visible history
+
+When history changes, the engine stores new turns in SQLite and marks whether each turn is visible.
+
+The UI reconstructs resumed sessions from visible turns only.
+
+---
+
+## 9. Agent Loop
+
+The multi-step planner is in src/agent/loop.ts.
+
+### 9.1 Purpose
+
+It is responsible for repeated reasoning cycles until the model reaches a final response or step limit.
+
+### 9.2 Loop state
+
+State includes:
+
+- goal
+- messages
+- steps
+- stepCount
+- maxSteps
+- finished flag
+- final response
+
+### 9.3 Run flow
+
+For each run:
+
+1. Merge prior session history with the new user turn.
+2. Load optional context from GUIDE.md and memory.
+3. Call the LLM.
+4. If the LLM returns a normal response, finish.
+5. If it returns a tool call, execute the tool.
+6. Append a synthetic assistant tool-call message and a synthetic user tool-result message.
+7. Continue until finished or step limit.
+
+### 9.4 Memory writeback
+
+Every finished run is stored in the `memory` table with the goal, step list, and timestamp.
+
+---
+
+## 10. LLM Layer
+
+The Groq integration lives in src/llm/ollama.ts even though the file still uses historical `Ollama*` naming in types.
+
+### 10.1 Request configuration
+
+Current runtime configuration:
+
+- model: `llama-3.3-70b-versatile`
+- base URL: `https://api.groq.com/openai/v1`
+- response format: JSON object
+- temperature: `0.1`
+- retries for temporary errors
+
+### 10.2 Runtime API key resolution
+
+The API key is resolved lazily from:
+
+- `process.env['GROQ_API_KEY']`
+- fallback bundled define value if present
+
+This means runtime environment values can override build-time bundled secrets.
+
+### 10.3 System prompt
+
+The system prompt is long and operationally important. It documents:
+
+- allowed tools and their args
+- path rules
+- search-first behavior for fuzzy file requests
+- refusal behavior for blocked system directories
+- example JSON outputs
+- response formatting contract
+
+The current prompt includes these major tools:
+
+- `findFile`
+- `listFiles`
+- `deleteFile`
+- `moveFile`
+- `screenAutomation`
+- `openApplication`
+- `createDirectory`
+- `organiseByRule`
+- `openSettings`
+
+### 10.4 Tool validation
+
+src/llm/schema.ts uses Zod to define:
+
+- message schema
+- chat request schema
+- chat response schema
+- JSON payload schema
+- allowed tool name enum
+
+Tool calls are validated against `TOOL_NAMES` before dispatch.
+
+---
+
+## 11. Persistence Layer
+
+Persistence is in src/memory/store.ts and uses SQLite via better-sqlite3.
+
+Database location:
+
+- `%USERPROFILE%\.fella\memory.db`
+
+### 11.1 Tables
+
+Current tables are:
+
+- `memory`
+- `facts`
+- `sessions`
+- `session_turns`
+
+### 11.2 memory table
+
+Stores completed agent runs:
+
+- goal
+- serialized steps
+- timestamp
+
+### 11.3 facts table
+
+Stores persistent facts for future context injection.
+
+### 11.4 sessions table
+
+Stores session metadata:
+
+- id
+- started_at
+- last_at
+
+### 11.5 session_turns table
+
+Stores individual conversation turns:
+
+- session_id
+- role
+- content
+- timestamp
+- visible flag
+
+### 11.6 Session listing behavior
+
+`listSessions()` only returns sessions with at least one visible turn.
+
+`sessionExists()` also only treats non-empty sessions as resumable.
+
+---
+
+## 12. Context Loading
+
+src/memory/context.ts loads extra context for each agent run.
+
+It tries to read guide files in this order:
+
+- `FELLA.md`
+- `GUIDE.md`
+- parent-folder variants of those files
+
+Then it combines:
+
+- guide snippet
+- relevant recalled past actions
+- persistent facts
+
+This string is injected as a temporary system message for the run.
+
+---
+
+## 13. Security Model
+
+The key safety layer is src/security/pathGuard.ts.
+
+### 13.1 Allowed zones
+
+Allowed file access is limited to:
+
+- `C:\Users\...`
+- `D:\...`
+
+### 13.2 Blocked zones
+
+Hard-blocked examples:
+
+- `C:\Windows`
+- `C:\Program Files`
+- `C:\Program Files (x86)`
+- `C:\ProgramData`
+- `C:\System Volume Information`
+- recovery and boot style system locations
+
+### 13.3 Alias resolution
+
+Common aliases resolve to real user folders:
+
+- desktop
+- documents
+- downloads
+- pictures
+- music
+- videos
+- temp
+- appdata
+- localappdata
+- home
+- d:
+
+The resolver is also aware of OneDrive-redirected Windows shell folders.
+
+---
+
+## 14. Tool Registry
+
+The registry is in src/tools/registry.ts.
+
+It maps canonical tool names to implementations and also accepts aliases the model may emit.
+
+Examples of alias normalization:
+
+- `mkdir` -> `createDirectory`
+- `rm` -> `deleteFile`
+- `rename` -> `moveFile`
+- `settings` -> `openSettings`
+- `open` -> `screenAutomation`
+
+Dispatch goes through `executeTool(tool, args)`.
+
+---
+
+## 15. Tool Implementations
+
+### 15.1 listFiles
+
+Simple directory listing under the path-guard policy.
+
+### 15.2 findFile
+
+Fuzzy recursive search with:
+
+- tokenized matching
+- optional extension filters
+- optional folder hint filtering
+- score or recency sorting
+- junk-directory avoidance
+- fallback second pass if the clean pass finds nothing
+
+This is the main discovery tool used before file opening, moving, or deleting when the exact filename is unknown.
+
+### 15.3 deleteFile
+
+Deletes a file or directory under policy constraints.
+
+Engine-level handling wraps deletion in undo support by moving the item to a temporary trash area when possible.
+
+### 15.4 moveFile
+
+Moves or renames files and folders. Undo support records the inverse rename.
+
+### 15.5 createDirectory
+
+Creates directories recursively. Undo removes the folder only if it remains empty.
+
+### 15.6 organiseByRule
+
+Plans and optionally executes bulk file organization.
+
+Supported rules:
+
+- by_type
+- by_category
+- by_date
+- by_size
+- by_extension
+
+The LLM is instructed to run this tool with `dry_run: true` first so users see a preview before execution.
+
+### 15.7 openSettings
+
+This tool opens:
+
+- Windows Settings pages via `ms-settings:` URIs
+- common Control Panel applets via `control.exe` or `.cpl` targets
+
+Examples it supports:
+
+- wifi
+- bluetooth
+- battery
+- display
+- updates
+- control panel
+- programs and features
+- network connections
+
+For Wi-Fi and network-related requests, it also returns the current `netsh wlan show networks` output when available.
+
+### 15.8 openApplication
+
+Legacy launcher for app opening. In practice, direct user-facing launches usually go through `screenAutomation` so the launch is visible.
+
+### 15.9 screenAutomation
+
+This tool handles:
+
+- visible app launch
+- Explorer navigation
+- file opening through Explorer or default app
+- screenshot
+- OCR text search
+- mouse move, click, and double-click
+- keyboard typing and hotkeys
+- scroll
+
+Important distinction:
+
+- `launch` uses visible Windows behavior
+- `navigate` opens Explorer or a file
+- advanced OCR, mouse, and keyboard features depend on nut-js availability
+
+The tool also knows some virtual Windows folders such as:
+
+- recycle bin
+- this pc
+- control panel
+- network
+
+---
+
+## 16. Deterministic Shortcut Paths
+
+Some requests bypass the LLM entirely because they are simpler and safer to route directly.
+
+Current notable bypasses in the engine:
+
+- undo and redo
+- acknowledgements like `okay`
+- folder navigation by name
+- folder deletion by name
+- create-folder phrasing
+- simple `navigate to X`
+- open latest downloaded file by type
+- open settings and control-panel phrases
+- short direct app-launch phrases
+
+This reduces model dependency for obvious actions and improves reliability.
+
+---
+
+## 17. Session Semantics
+
+Session ids look like:
+
+```text
+sess-YYYYMMDD-HHMM-rand
 ```
 
-`undoStack.undo()` pops the last entry, calls its `undo()` function, and pushes it onto the redo stack. `redo()` reverses this. Both return a human-readable confirmation string.
+Behavior:
+
+- a new engine gets a generated id immediately
+- SQLite session row is created only on first persisted turn
+- only visible turns are shown when resuming in the UI
+- empty sessions are excluded from `fella sessions`
+
+This was changed specifically to prevent large numbers of useless zero-message sessions.
 
 ---
 
-### LLM Layer (Groq)
+## 18. Build and Packaging Pipeline
 
-#### `src/llm/schema.ts`
+Defined in package.json.
 
-All API types defined with Zod:
+### 18.1 `npm run typecheck`
 
-Note: schema/type identifiers keep an `Ollama*` prefix for backward compatibility,
-even though runtime requests are sent to Groq.
+Runs:
 
-| Schema | Description |
-|---|---|
-| `OllamaMessageSchema` | `{ role: 'system'\|'user'\|'assistant', content: string }` |
-| `OllamaChatRequestSchema` | Full chat request body |
-| `OllamaChatResponseSchema` | Raw HTTP response from Groq |
-| `OllamaJsonPayloadSchema` | Parsed model output — `{ tool, args }` or `{ response }` |
-
-`TOOL_NAMES` is a `const` tuple of all registered tool names:
-```ts
-export const TOOL_NAMES = [
-  'findFile', 'listFiles', 'deleteFile', 'moveFile',
-  'createDirectory', 'organiseByRule', 'screenAutomation',
-] as const;
+```text
+tsc --noEmit
 ```
 
-#### `src/llm/ollama.ts` — Groq Client
+This checks types only and emits no files.
 
-Configured with:
-- **Base URL:** `https://api.groq.com/openai/v1`
-- **Model:** `llama-3.3-70b-versatile`
-- **API Key:** `GROQ_API_KEY` — injected at bundle time via esbuild `--define`, not read from `.env` at runtime
-- **Temperature:** `0.1` — low temperature for deterministic, structured JSON output
-- **Format:** `response_format: { type: 'json_object' }` — forces valid JSON output
+### 18.2 `npm run build`
 
-**System prompt** covers:
+Runs:
 
-1. **Tool documentation** — every tool with its full parameter list and examples:
-   - `findFile` — fuzzy recursive search, `folder_hint`, `sort_by`, `extensions`
-   - `listFiles`, `deleteFile`, `moveFile`, `createDirectory`, `organiseByRule`
-   - `screenAutomation` — all actions: `launch`, `navigate`, `screenshot`, `click`, `type`, `key`, `hotkey`, `scroll`, `find_text`
+1. `npm run typecheck`
+2. `npm run bundle`
 
-2. **Path rules** — user aliases, D drive access, never emit raw `C:\Users\<name>` paths
+`bundle` runs scripts/bundle.mjs, which bundles the app into dist/ with esbuild.
 
-3. **Agentic planning rules:**
-   - Use `findFile` first when a file is referred to by description
-   - After `findFile` returns candidates, show them and ask the user to confirm
-   - Once confirmed, use the exact full path from the result
-   - Never guess a filename
-   - Confirm destructive actions before calling the tool
-   - **Never call any tool with system directory paths** (Windows, Program Files, System32, ProgramData) — respond with a refusal instead
+### 18.3 `npm run dist`
 
-4. **Common task examples** — multi-step walkthroughs showing the exact JSON for movie search, OOPS folder PDF, resume in downloads, etc.
+Runs the Windows distribution path.
+
+Effects:
+
+- runs `predist`
+- kills any running `fella-win.exe`
+- runs `build`
+- packages the app into `bin/fella-win.exe` using caxa
+
+### 18.4 `npm run sea`
+
+Alternative packaging path using Node SEA artifacts.
 
 ---
 
-### Tools
+## 19. Build Scripts
 
-All tools share the signature: `(args: Record<string, unknown>) => Promise<string>`.
+### scripts/bundle.mjs
 
-#### `src/tools/registry.ts`
+Bundles src/index.tsx into dist/index.js.
 
-Central dispatch table. Maintains:
-- `handlers` — maps each `ToolName` to its implementation function
-- `ALIASES` — maps shorthand names the model may emit (`mkdir`, `ls`, `rm`, `rename`, `open`, `click`, etc.) to canonical tool names
+It also injects env-backed define values for:
 
-#### `findFile` — Fuzzy Recursive Search
+- `GROQ_API_KEY`
+- `SUPABASE_URL`
+- `SUPABASE_ANON_KEY`
 
-The most important tool for agentic operation. Given a query and optional constraints, walks the file system and returns ranked matches.
+### scripts/postbundle.mjs
 
-**Parameters:**
+Adds runtime wrapper and shebang support and writes dist/run.cjs.
 
-| Param | Type | Description |
-|---|---|---|
-| `query` | `string?` | Words from the filename. Omit or leave empty to match all files |
-| `folder_hint` | `string?` | Name of a parent folder to constrain search — only files inside a folder whose name fuzzy-matches this hint are returned |
-| `dir` | `string?` | Search root alias or absolute path. Defaults to: Downloads, Documents, Desktop, Videos, Pictures, Music, D:\ |
-| `extensions` | `string[]?` | Filter by extension: `[".pdf"]`, `[".mp4", ".mkv"]` |
-| `sort_by` | `"score" \| "recent"` | Rank by filename match score (default) or by modification time (newest first) |
-| `max_results` | `number?` | Cap on returned results, default 8 |
+### scripts/predist.mjs
 
-**Scoring:** `tokenise()` splits filenames on separators, camelCase boundaries, and digit/letter transitions. Each query token is matched against filename tokens using substring matching. Score = fraction of query tokens matched.
+Prepares native pieces for Windows packaging and stub/icon work.
 
-**Two-pass junk filtering:**
-- **Pass 1 (clean):** walks the directory tree skipping `$RECYCLE.BIN`, `node_modules`, `.git`, `.svn`, `.hg`, `.tmp`, `temp` and any directory starting with `$` or `.`
-- **System dirs always skipped:** `Windows`, `System32`, `SysWOW64`, `Program Files`, `Program Files (x86)`, `ProgramData`, `System Volume Information`, `Recovery`, `Boot`, `WinSxS` — never walked in either pass
-- **Pass 2 (fallback):** if pass 1 found zero results, re-walks including junk dirs. This means Recycle Bin results are shown only when there is genuinely nothing else
+### scripts/sea.mjs
 
-**`folder_hint` behaviour:** the walk propagates an `insideMatchingFolder` flag down the tree. A file is only collected if the flag is true (i.e., some ancestor directory matched the hint). This correctly handles `D:\College\College\sem 6\OOSE\*.pdf` — the model passes `folder_hint: "OOSE"` and only files under that specific folder are returned.
+Builds the Node SEA path.
 
-#### `screenAutomation` — Screen and App Control
+---
 
-A unified tool for all GUI interactions.
+## 20. Environment Variables
+
+Required for normal operation:
+
+```env
+GROQ_API_KEY=...
+SUPABASE_URL=...
+SUPABASE_ANON_KEY=...
+```
+
+Optional:
+
+```env
+FELLA_MOCK=1
+FELLA_HOME=D:\path\to\install
+```
+
+Meaning:
+
+- `GROQ_API_KEY`: required for LLM calls
+- `SUPABASE_URL`: required for auth
+- `SUPABASE_ANON_KEY`: required for auth
+- `FELLA_MOCK=1`: bypasses the model and echoes mock responses
+- `FELLA_HOME`: lets packaged launchers resolve a fixed `.env`
+
+---
+
+## 21. Known Behavioral Limits
+
+Current limits to keep in mind:
+
+- opening a settings page is supported; changing the actual setting is usually not implemented unless a dedicated action exists
+- advanced screen automation depends on nut-js and native support
+- long-message expansion is keyboard or command driven, not mouse-click driven
+- the system is Windows-first; several behaviors are intentionally Windows-specific
+
+---
+
+## 22. Practical Mental Model
+
+When debugging FELLA, think in this order:
+
+1. Did index.tsx load the correct environment?
+2. Is the request handled by an engine shortcut path?
+3. If not, did the model emit a valid tool call?
+4. Did the registry map the tool name correctly?
+5. Did the tool hit a path-policy restriction?
+6. Did the engine persist the resulting visible turns?
+
+That is the real runtime chain for almost every user-visible behavior in the current implementation.
 
 **`action: "launch"`**
 

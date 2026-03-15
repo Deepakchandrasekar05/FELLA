@@ -8,6 +8,7 @@ import { randomBytes } from 'node:crypto';
 import { AgentLoop, AgentLoopHalt, type AgentStep } from '../agent/loop.js';
 import type { OllamaMessage } from '../llm/schema.js';
 import { resolvePath } from '../security/pathGuard.js';
+import { extractSettingRequest, getBatteryStatus } from '../tools/openSettings.js';
 import { executeTool, resolveToolName } from '../tools/registry.js';
 import { UndoStack }            from './history.js';
 import { buildPlan, executePlan, resolveSinceDate } from '../tools/organiseByRule.js';
@@ -34,8 +35,18 @@ interface PendingSelection {
   options: string[];
 }
 
-const CONFIRM_WORDS = new Set(['yes', 'y', 'confirm', 'do it', 'proceed', 'ok', 'sure']);
+const CONFIRM_WORDS = new Set(['yes', 'y', 'confirm', 'do it', 'proceed', 'ok', 'okay', 'sure']);
 const CANCEL_WORDS  = new Set(['no', 'n', 'cancel', 'stop', 'abort', 'nope']);
+const ACKNOWLEDGEMENT_WORDS = new Set([
+  'ok',
+  'okay',
+  'got it',
+  'understood',
+  'alright',
+  'all right',
+  'thanks',
+  'thank you',
+]);
 
 const FOLDER_SEARCH_MAX_DEPTH = 8;
 const FOLDER_SEARCH_MAX_RESULTS = 8;
@@ -504,6 +515,13 @@ export class Engine {
       return reply;
     }
 
+    if (!this.pendingConfirmation && !this.pendingSelection && ACKNOWLEDGEMENT_WORDS.has(trimmed)) {
+      const reply = trimmed === 'thanks' || trimmed === 'thank you' ? 'You can tell me the next thing to do.' : 'Okay.';
+      this.history.push({ role: 'user', content: userMessage });
+      this.history.push({ role: 'assistant', content: reply });
+      return reply;
+    }
+
     if (this.pendingSelection) {
       const selection = Number.parseInt(userMessage.trim(), 10);
       if (Number.isInteger(selection)) {
@@ -736,6 +754,33 @@ export class Engine {
       } catch (err) {
         reply = `Error opening last downloaded ${typeHint}: ${err instanceof Error ? err.message : String(err)}`;
       }
+      this.history.push({ role: 'assistant', content: reply });
+      return reply;
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // ── Keyword bypass — Windows Settings and Control Panel pages ───────────
+    const settingRequest = extractSettingRequest(userMessage);
+    if (settingRequest) {
+      this.history.push({ role: 'user', content: userMessage });
+      let reply: string;
+      try {
+        reply = await executeTool('openSettings', { setting: settingRequest });
+      } catch (err) {
+        reply = `Open settings error: ${err instanceof Error ? err.message : String(err)}`;
+      }
+      this.history.push({ role: 'assistant', content: reply });
+      return reply;
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // ── Keyword bypass — real battery status from Windows ───────────────────
+    const batteryStatusMatch = userMessage
+      .trim()
+      .match(/^(?:what(?:'?s|\s+is)?|show(?:\s+me)?|tell\s+me|check)\s+(?:the\s+)?battery(?:\s+(?:status|level|percentage|percent|charge))?\??$|^battery\s+(?:status|level|percentage|percent|charge)\??$/i);
+    if (batteryStatusMatch) {
+      this.history.push({ role: 'user', content: userMessage });
+      const reply = await getBatteryStatus();
       this.history.push({ role: 'assistant', content: reply });
       return reply;
     }

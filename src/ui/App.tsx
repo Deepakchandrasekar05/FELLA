@@ -111,6 +111,11 @@ export default function App({ isAuthenticated, sessionId, onRequestAuth }: Props
       savedDraftRef.current   = '';
       return;
     }
+
+    if (screen === 'chat' && key.ctrl && ch === 'm') {
+      setExpandLongMessages((prev) => !prev);
+      return;
+    }
     // ── History navigation ────────────────────────────────────────────────────
     if (!isThinking && key.upArrow) {
       const hist = historyRef.current;
@@ -175,8 +180,10 @@ export default function App({ isAuthenticated, sessionId, onRequestAuth }: Props
 
       // Push to history (avoid consecutive duplicates, matching bash behaviour)
       const compactCmd = trimmed.toLowerCase();
-      if (compactCmd === 'show more' || compactCmd === 'show less') {
-        const expand = compactCmd === 'show more';
+      const showMoreMatch = compactCmd.match(/^show\s+more\b/);
+      const showLessMatch = compactCmd.match(/^show\s+less\b/);
+      if (showMoreMatch || showLessMatch) {
+        const expand = Boolean(showMoreMatch);
         setExpandLongMessages(expand);
         setMessages((prev) => [
           ...prev,
@@ -278,7 +285,11 @@ export default function App({ isAuthenticated, sessionId, onRequestAuth }: Props
       ) : (
         /* ── Chat interface ── */
         <>
-          <MessageList messages={messages} isThinking={isThinking} />
+          <MessageList
+            messages={messages}
+            isThinking={isThinking}
+            expandLongMessages={expandLongMessages}
+          />
         </>
       )}
 

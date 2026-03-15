@@ -94,6 +94,7 @@ export const TOOL_NAMES = [
   'openApplication',
   'createDirectory',
   'organiseByRule',
+  'openSettings',
   'screenAutomation',
 ] as const;
 export type ToolName = (typeof TOOL_NAMES)[number];

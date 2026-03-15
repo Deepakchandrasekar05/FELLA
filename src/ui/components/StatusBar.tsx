@@ -9,6 +9,7 @@ type Shortcut = {
 const SHORTCUTS: Shortcut[] = [
   { keys: 'ctrl+c',   label: 'exit'       },
   { keys: 'ctrl+l',   label: 'clear'      },
+  { keys: 'ctrl+m',   label: 'expand'     },
   { keys: 'enter',    label: 'send'       },
   { keys: '?',        label: 'help'       },
 ];

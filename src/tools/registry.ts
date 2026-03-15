@@ -5,6 +5,7 @@ import { deleteFile }        from './deleteFile.js';
 import { moveFile }          from './moveFile.js';
 import { createDirectory }   from './createDirectory.js';
 import { organiseByRule }    from './organiseByRule.js';
+import { openSettings }      from './openSettings.js';
 import { screenAutomation }  from './screenAutomation.js';
 import { TOOL_NAMES, type ToolName } from '../llm/schema.js';
 
@@ -20,6 +21,7 @@ const handlers: Record<ToolName, ToolHandler> = {
   openApplication: (args) => screenAutomation({ action: 'launch', ...args }),
   createDirectory,
   organiseByRule,
+  openSettings,
   screenAutomation,
 };
 
@@ -48,6 +50,10 @@ const ALIASES: Record<string, ToolName> = {
   organize:             'organiseByRule',
   organise_files:       'organiseByRule',
   organize_files:       'organiseByRule',
+  settings:             'openSettings',
+  open_settings:        'openSettings',
+  windows_settings:     'openSettings',
+  control_panel:        'openSettings',
   // screen automation aliases
   screen:               'screenAutomation',
   screen_automation:    'screenAutomation',

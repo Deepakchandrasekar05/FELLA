@@ -66,7 +66,7 @@ function MessageItem({ message, expandLongMessages = false }: { message: Message
         </Text>
         {collapsible && (
           <Text color="#777777" dimColor>
-            {expandLongMessages ? 'show less' : 'show more'}
+            {expandLongMessages ? 'type "show less" or press Ctrl+M' : 'type "show more" or press Ctrl+M'}
           </Text>
         )}
       </Box>
