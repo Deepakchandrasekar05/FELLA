@@ -14,7 +14,6 @@ export type Message = {
 type Props = {
   messages: Message[];
   isThinking: boolean;
-  expandLongMessages?: boolean;
 };
 
 const ROLE_STYLES: Record<
@@ -27,22 +26,8 @@ const ROLE_STYLES: Record<
   error:     { prefix: '✕',  prefixColor: '#FF6B6B', textColor: '#FF6B6B' },
 };
 
-function collapseToSingleLine(content: string, maxLen = 120): string {
-  const firstLine = content.split(/\r?\n/, 1)[0] ?? '';
-  if (firstLine.length <= maxLen) return firstLine;
-  return `${firstLine.slice(0, Math.max(0, maxLen - 1)).trimEnd()}…`;
-}
-
-function isCollapsible(content: string): boolean {
-  return content.includes('\n') || content.length > 140;
-}
-
-function MessageItem({ message, expandLongMessages = false }: { message: Message; expandLongMessages?: boolean }) {
+function MessageItem({ message }: { message: Message }) {
   const style = ROLE_STYLES[message.role];
-  const collapsible = isCollapsible(message.content);
-  const collapsedPreview = collapseToSingleLine(message.content);
-  const shouldCollapse = collapsible && !expandLongMessages;
-  const bodyText = shouldCollapse ? collapsedPreview : message.content;
 
   return (
     <Box flexDirection="row" marginBottom={1} gap={1}>
@@ -62,13 +47,8 @@ function MessageItem({ message, expandLongMessages = false }: { message: Message
           </Text>
         )}
         <Text color={style.textColor} wrap="wrap">
-          {bodyText}
+          {message.content}
         </Text>
-        {collapsible && (
-          <Text color="#777777" dimColor>
-            {expandLongMessages ? 'type "show less" or press Ctrl+M' : 'type "show more" or press Ctrl+M'}
-          </Text>
-        )}
       </Box>
     </Box>
   );
@@ -90,11 +70,11 @@ function ThinkingIndicator() {
   );
 }
 
-export default function MessageList({ messages, isThinking, expandLongMessages = false }: Props) {
+export default function MessageList({ messages, isThinking }: Props) {
   return (
     <Box flexDirection="column" flexGrow={1} paddingX={1} marginBottom={1}>
       {messages.map((msg) => (
-        <MessageItem key={msg.id} message={msg} expandLongMessages={expandLongMessages} />
+        <MessageItem key={msg.id} message={msg} />
       ))}
       {isThinking && <ThinkingIndicator />}
     </Box>

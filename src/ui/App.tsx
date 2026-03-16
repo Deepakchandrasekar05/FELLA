@@ -70,7 +70,6 @@ export default function App({ isAuthenticated, sessionId, onRequestAuth }: Props
   const [messages, setMessages]     = useState<Message[]>(initialMessages);
   const [input, setInput]           = useState('');
   const [isThinking, setIsThinking] = useState(false);
-  const [expandLongMessages, setExpandLongMessages] = useState(false);
 
   const currentSessionId = engineRef.current.id;
 
@@ -112,10 +111,6 @@ export default function App({ isAuthenticated, sessionId, onRequestAuth }: Props
       return;
     }
 
-    if (screen === 'chat' && key.ctrl && ch === 'm') {
-      setExpandLongMessages((prev) => !prev);
-      return;
-    }
     // ── History navigation ────────────────────────────────────────────────────
     if (!isThinking && key.upArrow) {
       const hist = historyRef.current;
@@ -179,24 +174,6 @@ export default function App({ isAuthenticated, sessionId, onRequestAuth }: Props
       }
 
       // Push to history (avoid consecutive duplicates, matching bash behaviour)
-      const compactCmd = trimmed.toLowerCase();
-      const showMoreMatch = compactCmd.match(/^show\s+more\b/);
-      const showLessMatch = compactCmd.match(/^show\s+less\b/);
-      if (showMoreMatch || showLessMatch) {
-        const expand = Boolean(showMoreMatch);
-        setExpandLongMessages(expand);
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: (Date.now() + 1).toString(),
-            role: 'system',
-            content: expand ? 'Expanded long messages.' : 'Collapsed long messages to one-line previews.',
-            timestamp: new Date(),
-          },
-        ]);
-        return;
-      }
-
       const hist = historyRef.current;
       if (hist.length === 0 || hist[hist.length - 1] !== trimmed) {
         historyRef.current = [...hist, trimmed];
@@ -270,7 +247,7 @@ export default function App({ isAuthenticated, sessionId, onRequestAuth }: Props
       {screen === 'login' ? (
         /* ── Login screen ── */
         <>
-          <MessageList messages={messages} isThinking={false} expandLongMessages={expandLongMessages} />
+          <MessageList messages={messages} isThinking={false} />
           <InputBar value={input} onChange={setInput} onSubmit={handleSubmit} isThinking={false} />
           <StatusBar sessionId={currentSessionId} />
         </>
@@ -288,7 +265,6 @@ export default function App({ isAuthenticated, sessionId, onRequestAuth }: Props
           <MessageList
             messages={messages}
             isThinking={isThinking}
-            expandLongMessages={expandLongMessages}
           />
         </>
       )}
