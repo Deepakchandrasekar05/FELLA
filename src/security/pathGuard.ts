@@ -1,15 +1,9 @@
-// pathGuard.ts — Path resolution: well-known aliases + relative → absolute
+// pathGuard.ts - Cross-platform path resolution and safety policy
 
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { resolve, isAbsolute, join, normalize } from 'node:path';
 import { execSync } from 'node:child_process';
 
-/**
- * Ask Windows for the real Shell special-folder path at startup (synchronous,
- * one-shot).  This correctly handles OneDrive-redirected Desktop/Documents/etc.
- * Returns undefined if PowerShell is unavailable (non-Windows or SEA bundle
- * without shell access).
- */
 function winShellFolder(name: string): string | undefined {
   if (process.platform !== 'win32') return undefined;
   try {
@@ -23,18 +17,11 @@ function winShellFolder(name: string): string | undefined {
   }
 }
 
-/**
- * Resolve the Downloads folder on Windows via the User Shell Folders registry
- * key (GUID {374DE290-123F-4565-9164-39C4925E467B}).  This correctly returns
- * the OneDrive-redirected path when applicable, unlike [Environment]::GetFolderPath
- * which has no SpecialFolder enum entry for Downloads.
- */
 function winDownloadsFolder(): string | undefined {
   if (process.platform !== 'win32') return undefined;
   try {
     const out = execSync(
-      `powershell.exe -NoProfile -NonInteractive -Command ` +
-      `"(New-Object -ComObject Shell.Application).Namespace('shell:Downloads').Self.Path"`,
+      "powershell.exe -NoProfile -NonInteractive -Command \"(New-Object -ComObject Shell.Application).Namespace('shell:Downloads').Self.Path\"",
       { encoding: 'utf8', timeout: 3000 },
     ).trim();
     return out.length > 0 ? out : undefined;
@@ -43,148 +30,166 @@ function winDownloadsFolder(): string | undefined {
   }
 }
 
-// ── Well-known folder aliases ─────────────────────────────────────────────────
-
 const home = homedir();
+const tmp = tmpdir();
 
-// Resolve Windows Shell special folders at startup so OneDrive-redirected
-// paths (Desktop, Documents, Pictures, Music, Videos) are always correct.
-const realDesktop   = winShellFolder('Desktop')   ?? join(home, 'Desktop');
-const realDocuments = winShellFolder('MyDocuments') ?? join(home, 'Documents');
-const realPictures  = winShellFolder('MyPictures') ?? join(home, 'Pictures');
-const realMusic     = winShellFolder('MyMusic')    ?? join(home, 'Music');
-const realVideos    = winShellFolder('MyVideos')   ?? join(home, 'Videos');
-const realDownloads = winDownloadsFolder() ?? join(home, 'Downloads');
+const knownFolders: Record<string, string> = (() => {
+  const base: Record<string, string> = {
+    home,
+    '~': home,
+    downloads: join(home, 'Downloads'),
+    download: join(home, 'Downloads'),
+    documents: join(home, 'Documents'),
+    document: join(home, 'Documents'),
+    docs: join(home, 'Documents'),
+    desktop: join(home, 'Desktop'),
+    pictures: join(home, 'Pictures'),
+    picture: join(home, 'Pictures'),
+    photos: join(home, 'Pictures'),
+    music: join(home, 'Music'),
+    videos: join(home, 'Videos'),
+    video: join(home, 'Videos'),
+    movies: join(home, 'Videos'),
+    temp: tmp,
+    tmp,
+  };
 
-/**
- * Maps common natural-language folder names (as the model may emit them) to
- * their absolute Windows paths.  Keys are lowercased and stripped of spaces.
- *
- * ACCESS POLICY
- * ─────────────
- * C drive  : only paths under C:\Users\ are permitted.
- * D drive  : full access — any path under D:\ is allowed.
- * Other    : blocked.
- */
-const KNOWN_FOLDERS: Record<string, string> = {
-  // ── User folders (all resolve inside C:\Users\<name>\) ─────────────────────
-  home,
-  '~': home,
-  downloads:    realDownloads,
-  download:     realDownloads,
-  documents:    realDocuments,
-  document:     realDocuments,
-  docs:         realDocuments,
-  desktop:      realDesktop,
-  pictures:     realPictures,
-  picture:      realPictures,
-  photos:       realPictures,
-  music:        realMusic,
-  videos:       realVideos,
-  video:        realVideos,
-  movies:       realVideos,
-  temp:         process.env['TEMP'] ?? join(home, 'AppData', 'Local', 'Temp'),
-  tmp:          process.env['TEMP'] ?? join(home, 'AppData', 'Local', 'Temp'),
-  appdata:      join(home, 'AppData', 'Roaming'),
-  localappdata: join(home, 'AppData', 'Local'),
-  // ── D drive ─────────────────────────────────────────────────────────────────
-  'd:':         'D:\\',
-  'd:\\':       'D:\\',
-  droot:        'D:\\',
-};
+  if (process.platform === 'win32') {
+    base['desktop'] = winShellFolder('Desktop') ?? base['desktop']!;
+    base['documents'] = winShellFolder('MyDocuments') ?? base['documents']!;
+    base['document'] = base['documents']!;
+    base['docs'] = base['documents']!;
+    base['pictures'] = winShellFolder('MyPictures') ?? base['pictures']!;
+    base['picture'] = base['pictures']!;
+    base['photos'] = base['pictures']!;
+    base['music'] = winShellFolder('MyMusic') ?? base['music']!;
+    base['videos'] = winShellFolder('MyVideos') ?? base['videos']!;
+    base['video'] = base['videos']!;
+    base['movies'] = base['videos']!;
+    base['downloads'] = winDownloadsFolder() ?? base['downloads']!;
+    base['download'] = base['downloads']!;
+    base['appdata'] = join(home, 'AppData', 'Roaming');
+    base['localappdata'] = join(home, 'AppData', 'Local');
+    base['d:'] = 'D:\\';
+    base['d:\\'] = 'D:\\';
+    base['droot'] = 'D:\\';
+  } else if (process.platform === 'darwin') {
+    base['appdata'] = join(home, 'Library', 'Application Support');
+    base['localappdata'] = join(home, 'Library', 'Application Support');
+    base['applications'] = '/Applications';
+    base['trash'] = join(home, '.Trash');
+  } else {
+    base['appdata'] = process.env['XDG_CONFIG_HOME'] ?? join(home, '.config');
+    base['localappdata'] = process.env['XDG_DATA_HOME'] ?? join(home, '.local', 'share');
+    base['trash'] = join(home, '.local', 'share', 'Trash');
+  }
 
-// ── Access policy ─────────────────────────────────────────────────────────────
+  return base;
+})();
 
-/**
- * System directories that must never be read or written.
- * These protect the OS, installed programs, and system configuration.
- */
-const BLOCKED_SYSTEM_PATHS = [
-  normalize('C:\\Windows\\'),
-  normalize('C:\\Program Files\\'),
-  normalize('C:\\Program Files (x86)\\'),
-  normalize('C:\\ProgramData\\'),
-  normalize('C:\\System Volume Information\\'),
-  normalize('C:\\Recovery\\'),
-  normalize('C:\\Boot\\'),
-  normalize('C:\\EFI\\'),
-].map(p => p.toUpperCase());
+function isPathInside(absPath: string, root: string): boolean {
+  const resolvedPath = normalize(resolve(absPath));
+  const resolvedRoot = normalize(resolve(root));
+  if (process.platform === 'win32') {
+    const p = resolvedPath.toUpperCase();
+    const r = resolvedRoot.toUpperCase();
+    return p === r || p.startsWith(`${r}\\`) || p.startsWith(`${r}/`);
+  }
+  return resolvedPath === resolvedRoot || resolvedPath.startsWith(`${resolvedRoot}/`);
+}
 
-/**
- * Throws if the resolved absolute path is not within an allowed zone:
- *   • C:\Users\  (the current user tree, and their Temp)
- *   • D:\        (entire D drive)
- *
- * System directories (Windows, Program Files, ProgramData, etc.) are
- * always blocked regardless of which drive they reside on.
- */
-export function assertAllowed(absPath: string): void {
-  const norm  = normalize(absPath).toUpperCase();
+function assertAllowedWindows(absPath: string): void {
+  const blocked = [
+    'C:\\Windows',
+    'C:\\Program Files',
+    'C:\\Program Files (x86)',
+    'C:\\ProgramData',
+    'C:\\System Volume Information',
+    'C:\\Recovery',
+    'C:\\Boot',
+    'C:\\EFI',
+  ];
 
-  // Hard block — system directories must never be accessed
-  for (const blocked of BLOCKED_SYSTEM_PATHS) {
-    if (norm.startsWith(blocked) || norm === blocked.replace(/\\$/, '')) {
+  for (const dir of blocked) {
+    if (isPathInside(absPath, dir)) {
       throw new Error(
-        `⛔ Access denied: Cannot access system files or directories.\n` +
-        `"${absPath}" is a protected system path (Windows, Program Files, ProgramData, etc.).\n` +
-        `Modifying system files could break your computer's configuration.`,
+        `Access denied: "${absPath}" is a protected system path on Windows.`,
       );
     }
   }
 
-  const cUser = normalize('C:\\Users\\').toUpperCase();
-  const dRoot = normalize('D:\\').toUpperCase();
-
-  if (norm.startsWith(dRoot)) return;       // D drive — always allowed
-  if (norm.startsWith(cUser)) return;       // C:\Users\... — allowed
+  const allowedRoots = ['C:\\Users', 'D:\\'];
+  if (allowedRoots.some((root) => isPathInside(absPath, root))) return;
 
   throw new Error(
-    `Access denied: "${absPath}" is outside the allowed zones.\n` +
-    `Allowed: C:\\Users\\ (user data) and D:\\ (entire D drive).`,
+    `Access denied: "${absPath}" is outside allowed zones. Allowed: C:\\Users and D:\\`,
   );
 }
 
-// ── Resolver ──────────────────────────────────────────────────────────────────
+function assertAllowedMac(absPath: string): void {
+  const blockedPrefixes = ['/System', '/Library', '/private/var/root', '/usr', '/bin', '/sbin'];
+  if (blockedPrefixes.some((p) => isPathInside(absPath, p))) {
+    throw new Error(`Access denied: "${absPath}" is a protected macOS system path.`);
+  }
 
-/**
- * Resolve a raw path string supplied by the model into a safe absolute path,
- * then verify it falls within the allowed zones before returning it.
- *
- * Resolution order:
- * 1. Well-known alias (e.g. "downloads", "desktop") → mapped absolute path
- * 2. Absolute path                                   → normalised as-is
- * 3. Relative path                                   → resolved from home dir
- */
+  const allowedRoots = [home, '/Volumes', tmp];
+  if (allowedRoots.some((root) => isPathInside(absPath, root))) return;
+
+  throw new Error(
+    `Access denied: "${absPath}" is outside allowed zones. Allowed: ${home}, /Volumes, ${tmp}`,
+  );
+}
+
+function assertAllowedLinux(absPath: string): void {
+  const blockedPrefixes = ['/bin', '/sbin', '/usr', '/lib', '/lib64', '/etc', '/proc', '/sys', '/dev', '/boot'];
+  if (blockedPrefixes.some((p) => isPathInside(absPath, p))) {
+    throw new Error(`Access denied: "${absPath}" is a protected Linux system path.`);
+  }
+
+  const allowedRoots = [home, '/media', '/mnt', tmp];
+  if (allowedRoots.some((root) => isPathInside(absPath, root))) return;
+
+  throw new Error(
+    `Access denied: "${absPath}" is outside allowed zones. Allowed: ${home}, /media, /mnt, ${tmp}`,
+  );
+}
+
+export function assertAllowed(absPath: string): void {
+  if (process.platform === 'win32') {
+    assertAllowedWindows(absPath);
+    return;
+  }
+  if (process.platform === 'darwin') {
+    assertAllowedMac(absPath);
+    return;
+  }
+  assertAllowedLinux(absPath);
+}
+
 export function resolvePath(raw: string): string {
   const trimmed = raw.trim();
+  if (!trimmed) throw new Error('Path cannot be empty.');
 
-  // 1. Alias lookup — normalise to lowercase, collapse spaces/underscores
   const key = trimmed.toLowerCase().replace(/[\s_-]+/g, '');
-  let resolved: string;
-  if (Object.prototype.hasOwnProperty.call(KNOWN_FOLDERS, key)) {
-    resolved = KNOWN_FOLDERS[key]!;
+  let resolvedPath: string;
+
+  if (Object.prototype.hasOwnProperty.call(knownFolders, key)) {
+    resolvedPath = knownFolders[key]!;
   } else {
-    // 1b. Alias prefix — e.g. "desktop/Test" or "downloads\file.txt"
-    //     Split on the first separator, resolve the leading part as an alias,
-    //     then join the remainder.  Without this, "desktop/Test" would fall
-    //     through to the relative-path branch and produce
-    //     C:\Users\<name>\desktop\Test (lowercase, wrong OneDrive path).
-    const sepIdx = trimmed.search(/[/\\]/);
+    const sepIdx = trimmed.search(/[\\/]/);
     const aliasKey = sepIdx !== -1
       ? trimmed.slice(0, sepIdx).toLowerCase().replace(/[\s_-]+/g, '')
       : '';
 
-    if (aliasKey && Object.prototype.hasOwnProperty.call(KNOWN_FOLDERS, aliasKey)) {
-      resolved = join(KNOWN_FOLDERS[aliasKey]!, trimmed.slice(sepIdx + 1));
+    if (aliasKey && Object.prototype.hasOwnProperty.call(knownFolders, aliasKey)) {
+      resolvedPath = join(knownFolders[aliasKey]!, trimmed.slice(sepIdx + 1));
     } else if (isAbsolute(trimmed)) {
-      // 2. Absolute path — normalise as-is
-      resolved = resolve(trimmed);
+      resolvedPath = resolve(trimmed);
     } else {
-      // 3. Relative — resolve from home dir
-      resolved = resolve(join(home, trimmed));
+      resolvedPath = resolve(join(home, trimmed));
     }
   }
 
-  assertAllowed(resolved);
-  return resolved;
+  assertAllowed(resolvedPath);
+  return resolvedPath;
 }

@@ -89,7 +89,7 @@ export async function openApplication(args: Record<string, unknown>): Promise<st
     } else if (platform === 'darwin') {
       command = ['open', '-a', appKey];
     } else {
-      command = ['xdg-open', appKey];
+      command = [appKey];
     }
   }
 

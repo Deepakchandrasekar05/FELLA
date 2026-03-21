@@ -3,6 +3,7 @@
 import { readdirSync, statSync, existsSync } from 'node:fs';
 import { join, extname, basename } from 'node:path';
 import { resolvePath } from '../security/pathGuard.js';
+import { defaultSearchRoots } from '../platform/runtime.js';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -10,15 +11,7 @@ const MAX_DEPTH   = 8;   // deep enough for D:\College\College\sem3\OOPS\file.pd
 const MAX_RESULTS = 8;
 
 /** Default folders to search when no dir is specified. */
-const DEFAULT_DIRS = [
-  'downloads',
-  'documents',
-  'desktop',
-  'videos',
-  'pictures',
-  'music',
-  'd:',
-];
+const DEFAULT_DIRS = defaultSearchRoots();
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 

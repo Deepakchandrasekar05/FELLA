@@ -1,202 +1,781 @@
-# FELLA CLI — Implementation Guide
+# FELLA CLI — Deep Implementation Guide (Teacher Edition)
 
 File Exploration and Local Logic Automation.
 
-This guide explains how the current codebase works end to end: startup flow, auth, UI, engine, tool routing, persistence, build pipeline, and environment configuration. It documents the implementation that exists now in the repository.
+This document is a “how it works + how to build it” guide for the FELLA CLI in this repo. It explains the full runtime pipeline (UI → engine → LLM → tools → safety → persistence), the external APIs, the local database schema, and why each major npm package exists.
+
+If you want a mental model in one sentence:
+
+FELLA is a terminal chat app (Ink/React) that turns natural language into structured JSON tool calls (Groq/OpenAI-compatible API; optional local Ollama fallback), executes those tools under a strict path policy, streams tool steps live, and persists visible conversation turns + run traces into SQLite.
 
 ---
 
-## 1. What FELLA Is
+## 0) Prerequisites
 
-FELLA is a Windows-first terminal assistant that accepts natural-language requests and turns them into:
-
-- file-system actions
-- Windows Explorer navigation
-- app launches
-- screen automation actions
-- Windows Settings and Control Panel navigation
-
-The app is not a generic shell wrapper. The main behavior is agentic:
-
-1. The user types a request in the Ink terminal UI.
-2. The execution engine decides whether the request can be handled by a deterministic shortcut path.
-3. If not, the request goes through the LLM agent loop.
-4. The model emits either a final response or a structured tool call.
-5. Tools execute inside policy constraints.
-6. Tool results are fed back into the model until the task is complete.
-7. Visible conversation turns are persisted as a resumable session.
+- Node.js `>= 18` (required by package.json)
+- Windows is the primary target, but many pieces are cross-platform
+- A Groq API key for LLM operation (`GROQ_API_KEY`)
+- Supabase project credentials for auth (`SUPABASE_URL`, `SUPABASE_ANON_KEY`)
+- For browser automation: Playwright browsers installed (see “Playwright” section)
+- For advanced screen automation (OCR/mouse/keyboard): nut-js native addon availability (works best from source)
 
 ---
 
-## 2. Runtime Stack
+## 1) Tech Stack Overview
 
-The current stack is:
+### 1.1 Frameworks & core runtime
 
-- TypeScript for source code
-- Node.js 18+ as runtime
-- Ink + React for terminal UI
-- OpenAI SDK pointed at Groq's OpenAI-compatible endpoint
-- Supabase for authentication
-- better-sqlite3 for local persistence
-- execa for process spawning
-- nut-js for OCR, mouse, and keyboard automation
-- esbuild for bundling
-- caxa for Windows packaging
+- TypeScript: the codebase language (`tsconfig.json` is strict)
+- Node.js: runtime (ESM project: `"type": "module"` in package.json)
+- Ink + React: renders the terminal UI as a React component tree
 
----
+### 1.2 External APIs (network)
 
-## 3. High-Level Architecture
+- Groq (LLM): called via the `openai` npm package using Groq’s OpenAI-compatible endpoint
+- Supabase Auth: email/password + Google OAuth, via `@supabase/supabase-js`
 
-The main runtime path is:
+### 1.3 Local services
 
-```text
-CLI startup
-  -> src/index.tsx
-  -> dotenv resolution
-  -> auth command handling or TUI launch
-  -> src/ui/App.tsx
-  -> src/execution/engine.ts
-  -> shortcut bypass OR src/agent/loop.ts
-  -> src/tools/registry.ts
-  -> concrete tool implementation
-  -> result back to UI and session storage
-```
+- Ollama (optional fallback LLM): HTTP calls to `http://127.0.0.1:11434/api/*`
 
-There are four main layers:
+### 1.4 Local “DB” (persistence)
 
-1. Entry and auth layer
-2. Terminal UI layer
-3. Execution engine and agent loop
-4. Tooling, storage, and safety layer
+- SQLite: stored via `better-sqlite3` in `%USERPROFILE%\.fella\memory.db`
+
+### 1.5 Automation
+
+- Playwright (Chromium): deterministic web automation and scraping
+- nut-js (OCR + mouse + keyboard): optional screen automation
+- execa: safe child-process spawning for OS commands (`cmd start`, `netsh`, `powershell`, etc.)
+
+### 1.6 Build & packaging
+
+- TypeScript compiler: typechecking only (`tsc --noEmit`)
+- esbuild: bundles `src/index.tsx` → `dist/index.js`
+- caxa: packages Node + dist into a Windows executable
+- SEA pipeline (Node Single Executable Application): alternate packaging route via scripts
 
 ---
 
-## 4. Project Structure
+## 2) Repo Structure (What lives where)
 
-Important files and folders:
+Key folders (high signal):
 
 ```text
 src/
-  index.tsx                  Entry point and CLI command routing
-  sea-entry.cjs              SEA bootstrap entry
+  index.tsx              Entry point (dotenv + CLI commands + render Ink UI)
+  ui/                    Ink/React UI
+  execution/engine.ts    Deterministic routing + confirmation + agent loop entry
+  agent/loop.ts          Multi-step tool-using loop (ReAct-style)
+  llm/                   LLM adapters + Zod schemas + system prompt
+  tools/                 Tool implementations (file ops + automation)
+  security/pathGuard.ts  Path alias resolution + allow/block policy
+  memory/store.ts        SQLite persistence (sessions + memory + facts)
+  memory/context.ts      Context loader (GUIDE + facts + recall → system msg)
+  platform/runtime.ts    Platform helpers (default roots/aliases)
 
-  agent/
-    loop.ts                  Multi-step agent loop
-
-  auth/
-    client.ts                Lazy Supabase client and auth token storage
-    commands.ts              signup/login/logout/google/whoami commands
-    email.ts                 Email auth helpers
-    google.ts                OAuth flow and callback server
-    session.ts               Auth-related persistence helpers
-    supabase.ts              Alternate lazy client helper
-
-  execution/
-    engine.ts                Main conversation engine and shortcut routing
-    history.ts               Undo/redo stack
-
-  llm/
-    client.ts                Thin adapter around the Groq client
-    ollama.ts                Groq request layer and system prompt
-    schema.ts                Zod schemas and allowed tool names
-
-  memory/
-    context.ts               Loads guide + recall + facts as extra context
-    store.ts                 SQLite persistence for memory and sessions
-
-  security/
-    pathGuard.ts             Alias resolution and path allow/block policy
-    validator.ts             Input validation helpers
-
-  tools/
-    registry.ts              Tool registry and alias mapping
-    createDirectory.ts       Create folder tool
-    deleteFile.ts            Delete tool
-    findFile.ts              Fuzzy file search
-    listFiles.ts             Directory listing
-    moveFile.ts              Move/rename tool
-    openApplication.ts       Legacy app launcher
-    openSettings.ts          Windows Settings and Control Panel launcher
-    organiseByRule.ts        File organisation planner/executor
-    screenAutomation.ts      GUI automation and Explorer/app navigation
-
-  ui/
-    App.tsx                  Root Ink app
-    components/
-      Header.tsx             Branding header
-      InputBar.tsx           Terminal input
-      MessageList.tsx        Message renderer
-      StatusBar.tsx          Shortcut hints and session id
+scripts/                 Build + packaging scripts (esbuild, SEA, icons)
+assets/                  Logos/icons used by packaging
+bin/                     Packaged binaries output
 ```
 
-Generated/runtime outputs:
+Runtime files created on the user machine:
 
-- dist/ contains bundled app artifacts
-- bin/fella-win.exe is the packaged Windows executable
-- %USERPROFILE%\.fella\memory.db stores sessions and memory
-- %USERPROFILE%\.fella\auth.json stores auth tokens
-
----
-
-## 5. Startup Flow
-
-The app starts in src/index.tsx.
-
-### 5.1 .env resolution
-
-The app tries these .env locations in order:
-
-1. `%FELLA_HOME%\.env`
-2. `<runtime_dir>\..\.env`
-3. `<cwd>\.env`
-
-It loads the first one that exists using dotenv with `override: true`.
-
-This supports:
-
-- local source execution
-- bundled dist execution
-- packaged executable execution
-
-### 5.2 CLI command handling
-
-Before the TUI starts, index.tsx handles these commands directly:
-
-- `fella signup`
-- `fella login`
-- `fella login --google`
-- `fella logout`
-- `fella whoami`
-- `fella sessions`
-- `fella resume --session_id <id>`
-- `fella resume <id>`
-
-If the command is `sessions`, the app reads local SQLite session summaries and exits.
-
-If the command is `resume`, it validates that the session exists and contains visible turns before launching the UI with that session id.
-
-### 5.3 Auth gate loop
-
-If no valid token is available, the app renders a login-mode UI first. After successful auth, it re-checks token validity and then renders the main authenticated app.
+- `%USERPROFILE%\.fella\auth.json` (Supabase tokens)
+- `%USERPROFILE%\.fella\memory.db` (SQLite sessions + memory + facts)
+- `%USERPROFILE%\.fella\screenshots\` (Playwright screenshots)
+- `%TEMP%\.fella-trash\` (engine soft-delete staging)
 
 ---
 
-## 6. Authentication Implementation
+## 3) The End-to-End Request Lifecycle
 
-Auth is implemented with Supabase.
+When the user types something like:
 
-### 6.1 Lazy client initialization
+```text
+open the latest downloaded pdf
+```
 
-The main client is in src/auth/client.ts.
+the runtime path is:
 
-The Supabase client is created lazily because ESM imports happen before dotenv has loaded environment values. The module exposes a Proxy so callers can still write `supabase.auth...` normally.
+```text
+Ink UI (src/ui/App.tsx)
+  -> Engine.send(userMessage) (src/execution/engine.ts)
+     -> deterministic shortcut? (fast path)
+        OR
+     -> AgentLoop.run(...) (src/agent/loop.ts)
+        -> LLMClient.chat(...) (src/llm/client.ts)
+           -> Groq primary (src/llm/ollama.ts)
+           -> Ollama fallback (local HTTP) if configured/available
+        -> registry.execute(tool,args) (src/tools/registry.ts)
+        -> tool implementation (src/tools/*.ts)
+     -> persist visible turns (src/memory/store.ts)
+  -> UI renders reply + step stream
+```
 
-Required env keys:
+Two important ideas:
 
-- `SUPABASE_URL`
-- `SUPABASE_ANON_KEY`
+1) “Deterministic shortcuts” exist so that simple intents don’t depend on LLM compliance.
+2) The “agent loop” exists so that complex tasks can be done step-by-step with tool results fed back into the model.
 
-If either is missing, the process exits with an explicit configuration error.
+---
+
+## 4) Entry Point & Environment Loading
+
+### 4.1 Why `.env` loading is non-trivial in ESM
+
+This repo is ESM (`"type": "module"`). In Node ESM, modules are evaluated as they are imported. Some modules (Supabase client, Groq client) must read environment variables, but environment variables are loaded in the entrypoint.
+
+To avoid “module imported before dotenv ran”, the code does two things:
+
+- In [src/index.tsx](src/index.tsx), it loads dotenv early.
+- In modules like the Groq client and Supabase client, it initializes lazily (function or Proxy) so it reads env values at first use.
+
+### 4.2 `.env` search order
+
+At startup, [src/index.tsx](src/index.tsx) tries:
+
+1) `%FELLA_HOME%\.env` (often set by a wrapper like `bin/fella.bat`)
+2) `<runtime_dir>\..\.env` (for `dist/` execution)
+3) `<cwd>\.env`
+
+It loads the first file that exists (dotenv with `override: true`).
+
+### 4.3 CLI commands vs TUI
+
+Before launching the TUI, it handles:
+
+- `signup`, `login`, `login --google`, `logout`, `whoami`
+- Session management: `sessions`, `resume <id>`
+
+If the user is not authenticated, the app renders a login-mode UI (still Ink/React), then executes the chosen auth command.
+
+---
+
+## 5) UI Layer (Ink + React)
+
+### 5.1 What Ink is
+
+Ink is a React renderer for the terminal. Instead of building a “raw readline UI”, you write React components (`<Box>`, `<Text>`) and Ink re-renders the terminal.
+
+Key files:
+
+- [src/ui/App.tsx](src/ui/App.tsx): owns screens (`login` | `welcome` | `chat`) and holds one long-lived `Engine`
+- [src/ui/components/InputBar.tsx](src/ui/components/InputBar.tsx): uses `ink-text-input` to capture user input
+- [src/ui/components/MessageList.tsx](src/ui/components/MessageList.tsx): renders messages + `ink-spinner` while thinking
+- [src/ui/components/StatusBar.tsx](src/ui/components/StatusBar.tsx): shows shortcuts + session id
+
+### 5.2 Step streaming
+
+When the agent loop executes tools, the UI receives `onStep(step)` callbacks and renders system messages like:
+
+```text
+Step 2 - findFile {"query":"resume","extensions":[".pdf"]} ✓
+Found 1 result(s) ...
+```
+
+That’s implemented by calling `Engine.send(trimmed, onStep)` and appending a synthetic “system” message in the UI.
+
+---
+
+## 6) The Engine (Deterministic Router + Safety Gates)
+
+The engine is the “traffic controller” between:
+
+- your UI messages
+- deterministic shortcuts
+- the agent loop
+- tool execution
+- persistence
+
+Main file: [src/execution/engine.ts](src/execution/engine.ts)
+
+### 6.1 Core engine state
+
+- `history`: rolling conversation history (messages sent to the LLM)
+- `pendingConfirmation`: stores a destructive action until the user says “yes”
+- `pendingSelection`: disambiguation when multiple folders/files match
+- `pendingOpenClarification`: when “open X” is ambiguous (app/folder/file/setting)
+- `undoStack`: reversible actions (move/create/organise/delete via trash)
+- `sessionStore`: SQLite persistence via `MemoryStore`
+
+### 6.2 Deterministic shortcuts (why they exist)
+
+Shortcuts exist because:
+
+- they’re faster (no network)
+- they’re safer (less chance the model “wanders”)
+- they improve reliability for common commands
+
+Examples handled without the LLM:
+
+- `undo`, `redo`
+- acknowledgements (`ok`, `thanks`) to avoid pointless model calls
+- `navigate to downloads`
+- `open the latest downloaded pdf`
+- `battery status`
+- short app launches (`open notepad`)
+- LeetCode “open problem by name” URL construction
+
+### 6.3 The “open …” resolver (important behavior)
+
+For simple `open X` (non-chained), the engine tries in order:
+
+1) “open in browser” syntax (`open github.com in chrome`) → `browserAutomation.navigate`
+2) settings intent (`open wifi settings`) → `openSettings`
+3) URL-like targets → `browserAutomation.navigate`
+4) direct path/alias resolution (if it exists) → `screenAutomation.navigate`
+5) app-like targets → `screenAutomation.launch`
+6) folder search by name → `screenAutomation.navigate`
+7) file search by name → `screenAutomation.navigate`
+8) if still ambiguous → ask clarification and store `pendingOpenClarification`
+
+This avoids a major failure mode: interpreting every “open X” as either Windows Settings or file search.
+
+### 6.4 Confirmation gating (delete + organise)
+
+The engine enforces “you must type yes” for destructive actions:
+
+- If the model calls `deleteFile`, the engine does not execute it immediately; it throws `AgentLoopHalt` with a prompt to the user.
+- `organiseByRule` must run as `dry_run: true` first; the engine queues the `dry_run: false` execution behind a confirmation.
+
+This gate exists because LLMs are probabilistic: you don’t want one accidental parse to delete files.
+
+### 6.5 Undo/Redo (how it’s implemented)
+
+Undo/redo is implemented as a two-stack history manager in [src/execution/history.ts](src/execution/history.ts).
+
+- Each reversible action is stored as a `{ description, undo(), redo() }` entry.
+- The engine pushes entries after successful operations (e.g., a move) and clears the redo stack whenever a new action is pushed.
+- `undo` pops from the “past” stack, runs `entry.undo()`, then pushes to the “future” stack.
+- `redo` pops from “future”, runs `entry.redo()`, then pushes back to “past”.
+
+---
+
+## 7) The Agent Loop (Multi-step tool use)
+
+Main file: [src/agent/loop.ts](src/agent/loop.ts)
+
+### 7.1 The protocol: JSON-only tool calling
+
+The model is instructed to return exactly one JSON object, shaped as one of:
+
+- `{ "tool": "toolName", "args": { ... } }`
+- `{ "response": "text" }`
+- `{ "error": "text" }`
+
+This is critical: it makes the model’s output machine-readable.
+
+### 7.2 Verify-before-done rule
+
+The loop enforces a reliability rule:
+
+If the model performed a mutating action (`createDirectory`, `moveFile`, `writeFile`, etc.), it must verify using a read-only tool (`listFiles`, `findFile`, `readFile`) before it is allowed to end with a final response.
+
+This prevents “hallucinated success”, where a model says “done” without checking the filesystem.
+
+### 7.3 Step limit
+
+There is a maximum step count (defaults in the engine config). This prevents infinite loops.
+
+### 7.4 Memory writeback
+
+At the end of a run, the loop stores a record of the run in SQLite (`memory` table):
+
+- goal
+- steps (serialized)
+- timestamp
+
+---
+
+## 8) LLM Layer (Groq primary + Ollama fallback)
+
+There are two related modules:
+
+- [src/llm/ollama.ts](src/llm/ollama.ts): the Groq client + system prompt + JSON parsing
+- [src/llm/client.ts](src/llm/client.ts): a hybrid adapter (Groq first, then Ollama fallback)
+
+### 8.1 Groq API usage (OpenAI-compatible)
+
+The `openai` npm package is used like:
+
+- `baseURL: https://api.groq.com/openai/v1`
+- `chat.completions.create({ model, messages, response_format })`
+
+`response_format: { type: 'json_object' }` asks Groq to force JSON output.
+
+### 8.2 Why Groq code lives in `ollama.ts`
+
+Historically the project started with Ollama; the types remained, but the actual client is Groq. The naming is a legacy detail; functionally it is “LLM JSON tool-caller client”.
+
+### 8.3 JSON parsing + failure fallback
+
+Even with JSON enforcement, models can fail. The code:
+
+- strips markdown code fences if they appear
+- tries direct JSON parse, then tries “extract first `{...}` block”
+- normalizes `{ action: ..., args: ... }` into `{ tool: ..., args: ... }`
+
+If Groq returns the known error “Failed to generate JSON” (HTTP 400), it retries without strict `response_format` but with an extra system message that re-states the JSON-only requirement.
+
+### 8.4 Ollama fallback (local)
+
+If Groq fails, `LLMClient` checks `http://127.0.0.1:11434/api/tags` to see whether Ollama is running and whether `qwen2.5` exists.
+
+If available, it calls:
+
+- `POST /api/chat` with `format: 'json'` and the messages.
+
+If both Groq and Ollama fail, the client returns a normal `{response: ...}` payload (so the app doesn’t crash).
+
+---
+
+## 9) Tool System
+
+### 9.1 The registry
+
+Main file: [src/tools/registry.ts](src/tools/registry.ts)
+
+Responsibilities:
+
+- map canonical tool names → handlers
+- support aliases the model may emit (e.g. `mkdir` → `createDirectory`)
+- enforce that the tool is in the allowed tool-name enum (from Zod schema)
+
+### 9.2 Tool schema validation (Zod)
+
+Main file: [src/llm/schema.ts](src/llm/schema.ts)
+
+Zod is used to define:
+
+- message shape
+- the JSON payload shape
+- the allowed tool list (`TOOL_NAMES`)
+
+This reduces accidental “tool name drift” and makes failures explicit.
+
+---
+
+## 10) File Tools (What they do and which Node APIs they use)
+
+All file tools resolve paths through the safety layer first.
+
+### 10.1 Path safety: `resolvePath()` is non-optional
+
+Before touching the filesystem, tools call `resolvePath(raw)` from [src/security/pathGuard.ts](src/security/pathGuard.ts).
+
+It:
+
+- expands friendly aliases (`downloads`, `desktop`, `d:`)
+- normalizes absolute/relative paths
+- blocks system directories (Windows: `C:\Windows`, `Program Files`, etc.)
+- allows only `C:\Users\...` and `D:\...` on Windows
+
+If `resolvePath` throws, the tool stops.
+
+### 10.2 listFiles
+
+File: [src/tools/listFiles.ts](src/tools/listFiles.ts)
+
+- Uses `fs.promises.readdir(..., { withFileTypes: true })`
+- Prints `[DIR]` vs `[FILE]`
+
+### 10.3 findFile (fuzzy recursive search)
+
+File: [src/tools/findFile.ts](src/tools/findFile.ts)
+
+Core algorithm:
+
+- tokenize filenames (handles underscores, dots, camelCase, digit boundaries)
+- compute a score in `[0..1]` based on query token matches
+- optionally filter by extensions
+- optionally restrict to “inside a folder that matches folder_hint”
+- skip system folders always; skip junk folders on pass 1; include them only on fallback pass
+- sort by score or by recent modification time
+
+This is the discovery tool you use before opening/moving when the exact path isn’t known.
+
+### 10.4 moveFile
+
+File: [src/tools/moveFile.ts](src/tools/moveFile.ts)
+
+- Uses `fs.promises.rename`
+- Checks source exists (`access`)
+- Never silently overwrites existing destinations
+- Can create parent directories (`mkdir(..., { recursive: true })`)
+
+The engine wraps this tool with undo/redo by recording the inverse rename.
+
+### 10.5 createFile / writeFile / readFile / renameFile
+
+Files:
+
+- [src/tools/createFile.ts](src/tools/createFile.ts)
+- [src/tools/writeFile.ts](src/tools/writeFile.ts)
+- [src/tools/readFile.ts](src/tools/readFile.ts)
+- [src/tools/renameFile.ts](src/tools/renameFile.ts)
+
+These use Node’s `fs/promises` APIs and exist for two reasons:
+
+- they give the model a safe, limited vocabulary
+- they support verification (readFile) after mutation
+
+### 10.6 deleteFile (and why it’s “soft delete” in practice)
+
+File tool: [src/tools/deleteFile.ts](src/tools/deleteFile.ts) is a hard delete (`rm -r`).
+
+But the engine intercepts `deleteFile` and performs a “trash move” instead (when possible) using:
+
+- `rename(source → %TEMP%/.fella-trash/<timestamp>_<name>)`
+
+That makes deletion undoable.
+
+---
+
+## 11) Organise Tool (Bulk file organization)
+
+File: [src/tools/organiseByRule.ts](src/tools/organiseByRule.ts)
+
+Key idea: two-phase execution.
+
+1) `dry_run: true` returns a preview summary (grouping + counts + size totals)
+2) `dry_run: false` performs the renames
+
+Rules supported:
+
+- `by_type` (Images, Videos, Audio, Documents, Code, …)
+- `by_category` (Images / Videos / PDFs / Other)
+- `by_date` (Year/Month)
+- `by_size` (Small/Medium/Large/Huge)
+- `by_extension` (PDF/PNG/…)
+
+The engine adds undo support by capturing the list of “actual moves” done during execution.
+
+---
+
+## 12) Settings Tool (Windows Settings, Control Panel, and real system queries)
+
+File: [src/tools/openSettings.ts](src/tools/openSettings.ts)
+
+### 12.1 What it does
+
+- Opens Windows Settings pages using `ms-settings:` URIs (e.g. `ms-settings:network-wifi`)
+- Opens Control Panel applets (e.g. `appwiz.cpl`, `ncpa.cpl`)
+- Can fetch “available Wi‑Fi networks” via `netsh wlan show networks` and include it in the response
+- Implements best-effort macOS/Linux mappings
+
+### 12.2 Node / OS APIs used
+
+- `execa('cmd', ['/c','start', '', 'ms-settings:...'])` on Windows
+- `netsh`, `nmcli`, `networksetup` as platform-specific helpers
+- Battery status uses PowerShell CIM on Windows, `pmset` on macOS, `upower`/`acpi` on Linux
+
+---
+
+## 13) Screen Automation (Visible automation)
+
+File: [src/tools/screenAutomation.ts](src/tools/screenAutomation.ts)
+
+This tool has two “modes” internally:
+
+1) Launching apps via PowerShell/Start Menu/Win+R (no nut-js required)
+2) OCR/mouse/keyboard automation via nut-js (lazy-loaded)
+
+### 13.1 App launching (Windows)
+
+Launch flow:
+
+- Guard against system directories masquerading as “apps”
+- Search Start Menu `.lnk` shortcuts (user + system Start Menu paths)
+- If found: `Start-Process` the shortcut
+- Else: open Win+R dialog via COM (`Shell.Application`) and type a mapped command (e.g. `calc`, `msedge`, `code`)
+
+### 13.2 Navigation
+
+`action: 'navigate'` opens a folder (or a virtual folder like Recycle Bin) using:
+
+- `cmd /c start "" <pathOrUri>` on Windows
+- `open` on macOS
+- `xdg-open` on Linux
+
+If a full file path is provided, it opens the file directly with the OS default handler.
+
+### 13.3 OCR + input automation
+
+`@nut-tree-fork/nut-js` provides:
+
+- OCR-based “find text on screen”
+- mouse movement/click
+- keyboard typing, hotkeys
+
+It’s loaded lazily to reduce startup cost and to avoid packaging failures when native addons are unavailable.
+
+---
+
+## 14) Browser Automation (Playwright)
+
+File: [src/tools/browserAutomation.ts](src/tools/browserAutomation.ts)
+
+### 14.1 What it is
+
+Playwright runs a real browser (Chromium here) with a controllable API.
+
+FELLA keeps a persistent browser/context/page in module-level variables for speed:
+
+- first call launches Chromium and opens a page
+- later calls reuse the same page unless closed
+
+### 14.2 Supported actions
+
+- `navigate` (URL)
+- `search` (Google)
+- `click` (by selector or visible text)
+- `type` (into selector or active field)
+- `get_text` (selector or body fallback; special handling for npm weekly downloads)
+- `scroll`, `wait`, `screenshot`, `close`
+
+### 14.3 Safety policy
+
+The tool refuses to automate obvious login/payment domains by string hinting (defense-in-depth). This is deliberately conservative.
+
+### 14.4 Installing Playwright browsers
+
+If Playwright is installed but browsers aren’t, run:
+
+```bat
+npx playwright install chromium
+```
+
+---
+
+## 15) Security Model (Path Guard)
+
+File: [src/security/pathGuard.ts](src/security/pathGuard.ts)
+
+### 15.1 Why this exists
+
+When you give an LLM tools, it can attempt to access any path you let it. A path guard is the main line of defense that keeps the agent in user-space.
+
+### 15.2 Aliases
+
+Aliases map friendly names to real directories:
+
+- `downloads`, `documents`, `desktop`, `pictures`, `music`, `videos`, `temp`, `home`
+- `appdata`, `localappdata` (Windows)
+- `d:` and `droot` (Windows)
+
+On Windows it also queries shell folder paths via PowerShell so OneDrive redirects still work.
+
+Related helper: [src/platform/runtime.ts](src/platform/runtime.ts)
+
+- Defines the cross-platform “default navigate aliases” and “default search roots”.
+- Adds Windows-only helpers like `d:` and virtual folders (Recycle Bin / This PC / Control Panel).
+
+### 15.3 Allowed vs blocked zones
+
+On Windows:
+
+- Allowed: `C:\Users\...` and `D:\...`
+- Blocked: `C:\Windows`, `C:\Program Files`, `C:\ProgramData`, etc.
+
+On macOS/Linux, a similar “user-space only” policy is enforced.
+
+---
+
+## 16) Persistence (SQLite) + Session Semantics
+
+File: [src/memory/store.ts](src/memory/store.ts)
+
+### 16.1 Why SQLite
+
+SQLite is a great fit for a single-user local CLI:
+
+- no server to run
+- transactional
+- fast reads/writes
+
+### 16.2 Database location
+
+- `%USERPROFILE%\.fella\memory.db`
+
+### 16.3 Tables (and what they mean)
+
+- `sessions`: session metadata (`id`, `started_at`, `last_at`)
+- `session_turns`: each message turn (role/content/timestamp/visible)
+- `memory`: run traces (goal/steps/timestamp)
+- `facts`: user facts (fact/source/timestamp)
+
+### 16.4 “Visible turns” concept
+
+The engine stores both user-visible chat and internal tool messages. To keep `resume` clean, it marks turns as visible or not.
+
+### 16.5 Empty session avoidance
+
+Sessions are created lazily: the engine doesn’t insert a `sessions` row until there is at least one persisted turn. This prevents the session list from filling with 0-message sessions.
+
+---
+
+## 17) Context Loading (Lightweight RAG)
+
+File: [src/memory/context.ts](src/memory/context.ts)
+
+Every agent run can include extra context:
+
+- a snippet of `GUIDE.md` from the repo
+- “facts” saved into SQLite
+- a small set of recalled past goals
+
+That context is injected as a temporary system message at the start of the run.
+
+This is not a vector database; it’s a simple, effective “cheap RAG” strategy.
+
+---
+
+## 18) Authentication (Supabase)
+
+Files:
+
+- [src/auth/client.ts](src/auth/client.ts)
+- [src/auth/commands.ts](src/auth/commands.ts)
+
+### 18.1 Supabase client initialization
+
+Supabase client is created lazily because env vars might not be ready at module import time.
+
+Auth config:
+
+- `flowType: 'pkce'` for OAuth code exchange
+- no implicit session persistence (FELLA stores tokens itself)
+
+### 18.2 Token storage
+
+- `%USERPROFILE%\.fella\auth.json`
+
+Stored fields include access token, refresh token, user id/email, and an expiry timestamp.
+
+### 18.3 Google OAuth flow
+
+- starts a local HTTP server on port `54321`
+- opens the Supabase OAuth URL
+- receives `?code=...`
+- exchanges code for session
+- stores tokens
+
+---
+
+## 19) Build, Bundle, and Packaging
+
+### 19.1 Typechecking
+
+`npm run typecheck` runs `tsc --noEmit`.
+
+This is a deliberate pattern: esbuild does output; TypeScript checks types.
+
+### 19.2 Bundling
+
+Script: [scripts/bundle.mjs](scripts/bundle.mjs)
+
+- bundles `src/index.tsx` to `dist/index.js`
+- injects build-time env values using esbuild `define`
+
+Important detail: runtime env variables can still override bundled values because code reads `process.env['KEY']` first.
+
+### 19.3 caxa packaging
+
+`npm run dist` creates `bin/fella-win.exe` using caxa with a stub exe.
+
+### 19.4 SEA packaging
+
+Script: [scripts/sea.mjs](scripts/sea.mjs)
+
+This is a more advanced packaging method using Node SEA blobs, blob injection via `postject`, icon setting (rcedit), and optional signing.
+
+Notes:
+
+- The script runs `npx postject ...` (so `postject` is fetched on demand if it isn’t already present).
+- On Windows it generates `assets/FELLA_CAT.ico` by running `scripts/gen-ico.mjs` (this is why `canvas` exists in `devDependencies`).
+
+---
+
+## 20) npm Packages Map (What each dependency is for)
+
+This section is intentionally explicit so you can learn the stack.
+
+### Runtime dependencies
+
+- `ink`, `react`: terminal UI framework (React renderer)
+- `ink-text-input`: editable input field used in InputBar
+- `ink-spinner`: “thinking…” spinner
+- `openai`: OpenAI-compatible client used for Groq LLM calls
+- `@supabase/supabase-js`: auth flows and token refresh
+- `zod`: schemas for tool-call payloads + message validation
+- `better-sqlite3`: synchronous SQLite driver (local persistence)
+- `execa`: child process spawning wrapper for OS commands
+- `playwright`: browser automation (Chromium)
+- `dotenv`: load `.env` files
+- `@nut-tree-fork/nut-js`: screen automation (OCR, mouse, keyboard)
+
+### Dev/build dependencies
+
+- `typescript`: type checking
+- `tsx`: run TS/TSX directly in dev (`npx tsx src/index.tsx`)
+- `esbuild`: bundling
+- `caxa`: packaging dist into an executable
+- `canvas`: used by scripts that generate logos/icons (not used at runtime)
+- `rcedit`: Windows exe icon editing for SEA builds
+
+### Present but currently unused in `src/`
+
+- `chalk`: not imported in current `src/` (could be used for colored logs later)
+- `env-paths`: not imported in current `src/` (paths are currently built via `os.homedir()`)
+- `trash`: not imported in current `src/` (engine implements its own trash staging)
+
+If you want, you can remove unused deps to reduce install size.
+
+---
+
+## 21) How to Add a New Tool (Implementation Checklist)
+
+To add a new tool safely, follow this order:
+
+1) Implement the tool in `src/tools/<toolName>.ts`.
+   - Always call `resolvePath()` on any user-provided path.
+2) Register it in [src/tools/registry.ts](src/tools/registry.ts).
+3) Add the tool name to the `TOOL_NAMES` enum in [src/llm/schema.ts](src/llm/schema.ts).
+4) Update the system prompt in [src/llm/ollama.ts](src/llm/ollama.ts) with:
+   - what the tool does
+   - exact arg schema
+   - examples
+5) Decide whether the engine should add deterministic routing or confirmation gating.
+6) If it mutates state, ensure the agent loop can verify it with a read-only tool.
+
+---
+
+## 22) Glossary (Terms used in this repo)
+
+- **Agent loop / ReAct loop**: iterative pattern “think → tool call → observe result → next step”.
+- **Tool call**: the model emits a structured `{tool,args}` object that the program can execute.
+- **Deterministic shortcut**: direct code path that bypasses the model for simple intents.
+- **Confirmation gate**: the engine requires an explicit “yes” before executing a destructive action.
+- **RAG**: retrieval-augmented generation; here it’s lightweight (guide snippet + recall + facts).
+- **PKCE**: OAuth security mechanism used by Supabase for the Google login flow.
+- **ESM**: JavaScript module system used by this project (`type: module`).
+- **SEA**: Node Single Executable Application (blob injected into node binary).
+- **Path guard**: safety layer that limits what filesystem paths tools can touch.
+
+---
+
+## 23) Practical Debugging Checklist
+
+When something behaves unexpectedly, debug in this order:
+
+1) Does [src/index.tsx](src/index.tsx) load the correct `.env` file?
+2) Did the engine handle the request via a shortcut? (If yes, the LLM isn’t involved.)
+3) If it hit the agent loop: did the model emit valid JSON?
+4) Did the registry recognize the tool name (or alias)?
+5) Did `resolvePath()` block the requested path?
+6) Did the engine persist visible turns and update `sessions.last_at`?
+
 
 ### 6.2 Token storage
 
@@ -1126,3 +1705,47 @@ An alternative build path using Node.js Single Executable Applications (`node --
 | `"open program files"` | Blocked at LLM, `actionLaunch`, and `pathGuard` — all three layers refuse |
 | `"navigate to downloads"` | Keyword bypass — opens Explorer directly without calling the LLM |
 | `"open notepad"` | Keyword bypass attempts Start Menu search; falls back to Win+R `notepad` |
+
+
+Implemented. FELLA now has a cross-platform runtime path for Windows, macOS, and Linux, while keeping the same agent loop, tool registry, persistence, auth, and UI layers intact.
+
+What I changed
+
+Platform abstraction helpers
+Added runtime.ts to centralize OS detection and default roots/aliases used by engine and tools.
+Cross-platform safe path policy
+Replaced Windows-only guard with OS-aware policies in pathGuard.ts.
+Windows: keeps existing C:\Users + D:\ model and blocks system folders.
+macOS: allows user home, /Volumes, temp; blocks system roots.
+Linux: allows user home, /media, /mnt, temp; blocks system roots.
+Kept alias resolution behavior (downloads/documents/desktop/etc.) across all OSes.
+Engine + search default roots now OS-aware
+Updated engine.ts to use platform-aware search roots and folder alias matching.
+Updated findFile.ts to use platform-aware default search directories.
+Settings support across platforms
+Reworked openSettings.ts:
+Windows keeps existing ms-settings/control panel behavior.
+macOS opens System Settings with per-setting URI mapping + fallback.
+Linux opens desktop settings via gnome-control-center/systemsettings/xfce/xdg-open fallbacks.
+Battery status now supports Windows, macOS (pmset), and Linux (upower/acpi).
+Screen automation launch/navigation portability
+Updated screenAutomation.ts:
+launch now works on macOS/Linux (mapped app names + launcher fallbacks) while preserving Windows launch flow.
+navigate now opens folders/files with OS default opener on all platforms.
+Open application fallback on Linux
+Updated openApplication.ts to launch executable names directly on Linux fallback.
+LLM prompt made platform-aware
+Updated ollama.ts so planning and safety instructions are no longer Windows-only.
+Validation performed
+
+Ran TypeScript compile check: npm run typecheck
+Result: passes with no errors.
+Important note on “no compromise” requirement
+
+Core FELLA architecture and features are preserved across platforms.
+A few OS-level actions depend on what is installed on the host (example: Linux settings frontends, app command availability), so behavior uses robust fallbacks rather than hard failure.
+This is the practical way to keep feature parity while remaining platform-independent.
+Next step I recommend
+
+I can now add a CI OS matrix (Windows/macOS/Linux) with smoke tests for tool actions so cross-platform behavior is continuously verified.
+GPT-5.3-Codex • 1x

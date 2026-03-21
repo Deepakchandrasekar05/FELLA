@@ -200,6 +200,7 @@ export default function App({ isAuthenticated, sessionId, onRequestAuth }: Props
         .send(trimmed, (step) => {
           liveStep += 1;
 
+          const argsText = JSON.stringify(step.args ?? {});
           const resultText =
             typeof step.result === 'string'
               ? step.result
@@ -208,7 +209,7 @@ export default function App({ isAuthenticated, sessionId, onRequestAuth }: Props
           const stepMessage: Message = {
             id: `${Date.now()}-step-${liveStep}`,
             role: 'system',
-            content: resultText,
+            content: `Step ${liveStep} - ${step.tool} ${argsText} ${step.success ? '✓' : '✕'}\n${resultText}`,
             timestamp: new Date(),
           };
 

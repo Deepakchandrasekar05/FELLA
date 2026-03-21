@@ -91,11 +91,16 @@ export const TOOL_NAMES = [
   'findFile',
   'deleteFile',
   'moveFile',
+  'createFile',
+  'writeFile',
+  'readFile',
+  'renameFile',
   'openApplication',
   'createDirectory',
   'organiseByRule',
   'openSettings',
   'screenAutomation',
+  'browserAutomation',
 ] as const;
 export type ToolName = (typeof TOOL_NAMES)[number];
 

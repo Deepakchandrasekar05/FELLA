@@ -129,6 +129,29 @@ const RUN_DIALOG_MAP: Record<string, string> = {
   cmd:              'cmd',
 };
 
+const NON_WINDOWS_APP_MAP: Record<string, { darwin?: string; linux?: string }> = {
+  notepad: { darwin: 'TextEdit', linux: 'gedit' },
+  calculator: { darwin: 'Calculator', linux: 'gnome-calculator' },
+  calc: { darwin: 'Calculator', linux: 'gnome-calculator' },
+  explorer: { darwin: 'Finder', linux: 'nautilus' },
+  terminal: { darwin: 'Terminal', linux: 'x-terminal-emulator' },
+  chrome: { darwin: 'Google Chrome', linux: 'google-chrome' },
+  browser: { darwin: 'Safari', linux: 'xdg-open' },
+  vscode: { darwin: 'Visual Studio Code', linux: 'code' },
+};
+
+async function openPathWithDefault(pathOrUri: string): Promise<void> {
+  if (process.platform === 'win32') {
+    await execa('cmd', ['/c', 'start', '', pathOrUri], { reject: false });
+    return;
+  }
+  if (process.platform === 'darwin') {
+    await execa('open', [pathOrUri], { reject: false });
+    return;
+  }
+  await execa('xdg-open', [pathOrUri], { reject: false });
+}
+
 /** Find text on screen with OCR. Tries single-word match first, then full-line. */
 async function locateText(nut: NutModule, text: string): Promise<{ x: number; y: number }> {
   const words = text.trim().split(/\s+/);
@@ -149,6 +172,25 @@ const BLOCKED_SYSTEM_APPS = new Set([
 ]);
 
 async function actionLaunch(app: string): Promise<string> {
+  if (process.platform !== 'win32') {
+    const appLower = app.toLowerCase().trim();
+    const mapped = NON_WINDOWS_APP_MAP[appLower];
+
+    if (process.platform === 'darwin') {
+      const target = mapped?.darwin ?? app;
+      await execa('open', ['-a', target], { reject: false, detached: true, stdio: 'ignore' });
+      return `Launched "${target}"`;
+    }
+
+    const target = mapped?.linux ?? app;
+    if (target === 'xdg-open') {
+      await execa('xdg-open', ['https://'], { reject: false, detached: true, stdio: 'ignore' });
+    } else {
+      await execa(target, [], { reject: false, detached: true, stdio: 'ignore' });
+    }
+    return `Launched "${target}"`;
+  }
+
   const appLower = app.toLowerCase().trim();
 
   // Hard block — never launch system directories
@@ -418,7 +460,7 @@ async function actionNavigate(
   const FILE_EXT = /\.(?:pdf|docx?|xlsx?|pptx?|txt|csv|mp4|mkv|avi|mov|wmv|mp3|flac|jpg|jpeg|png|gif|webp|zip|rar|7z|exe|msi|iso|odt|rtf)$/i;
   if (FILE_EXT.test(rawPath.trim()) && !args['file']) {
     const resolvedFile = resolvePath(rawPath);
-    await execa('cmd', ['/c', 'start', '', resolvedFile], { reject: false });
+    await openPathWithDefault(resolvedFile);
     return `Opened "${resolvedFile}" with its default application`;
   }
 
@@ -427,21 +469,21 @@ async function actionNavigate(
   const folderPath = shellPath ?? resolvePath(rawPath);
   const fileName   = args['file'] ? String(args['file']).trim() : undefined;
 
-  // Open Explorer to the folder
-  await execa('cmd', ['/c', 'start', '', folderPath], { reject: false });
+  // Open file manager to the folder
+  await openPathWithDefault(folderPath);
 
   if (fileName) {
     const filePath = join(folderPath, fileName);
 
     // Brief pause so Explorer has time to open, then launch the file
-    // with its default application via the Windows shell association.
+    // with its default associated application.
     await new Promise<void>((r) => setTimeout(r, 600));
-    await execa('cmd', ['/c', 'start', '', filePath], { reject: false });
+    await openPathWithDefault(filePath);
 
     return `Navigated Explorer to "${folderPath}" and opened "${fileName}"`;
   }
 
-  return `Navigated Explorer to "${folderPath}"`;
+  return `Navigated to "${folderPath}"`;
 }
 
 // â”€â”€ Public tool handler â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€

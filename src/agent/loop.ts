@@ -18,6 +18,7 @@ export interface AgentStep {
   tool: string;
   args: unknown;
   result: unknown;
+  success: boolean;
   timestamp: string;
 }
 
@@ -83,11 +84,44 @@ export class AgentLoop {
       });
     }
 
+    const VERIFY_TOOLS = new Set(['listFiles', 'findFile', 'readFile']);
+    const MUTATING_TOOLS = new Set([
+      'createDirectory',
+      'createFile',
+      'writeFile',
+      'renameFile',
+      'moveFile',
+      'deleteFile',
+      'organiseByRule',
+    ]);
+
+    const hasUnverifiedMutatingWork = (): boolean => {
+      for (let i = state.steps.length - 1; i >= 0; i--) {
+        const stepTool = state.steps[i]!.tool;
+        if (VERIFY_TOOLS.has(stepTool)) return false;
+        if (MUTATING_TOOLS.has(stepTool)) return true;
+      }
+      return false;
+    };
+
     while (!state.finished && state.stepCount < state.maxSteps) {
       state.stepCount++;
       const llmResponse = await this.llm.chat(state.messages);
 
       if (llmResponse.response) {
+        if (hasUnverifiedMutatingWork()) {
+          state.messages.push({
+            role: 'assistant',
+            content: JSON.stringify({ response: llmResponse.response }),
+          });
+          state.messages.push({
+            role: 'user',
+            content:
+              'Do not finish yet. Verify the result of your most recent write/move/create/delete action using an appropriate read-only tool (readFile, listFiles, or findFile), then continue. Only return {"response":"..."} after verification succeeds.',
+          });
+          continue;
+        }
+
         state.finished = true;
         state.finalResponse = llmResponse.response;
         break;
@@ -110,6 +144,7 @@ export class AgentLoop {
           tool: llmResponse.tool,
           args: llmResponse.args ?? {},
           result: null,
+          success: true,
           timestamp: new Date().toISOString(),
         };
 
@@ -117,6 +152,7 @@ export class AgentLoop {
           const result = await this.executeTool(llmResponse.tool, (llmResponse.args ?? {}) as Record<string, unknown>);
           step.result = result;
         } catch (err) {
+          step.success = false;
           if (err instanceof AgentLoopHalt) {
             state.finished = true;
             state.finalResponse = err.response;

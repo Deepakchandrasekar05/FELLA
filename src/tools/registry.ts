@@ -3,10 +3,15 @@ import { listFiles }         from './listFiles.js';
 import { findFile }          from './findFile.js';
 import { deleteFile }        from './deleteFile.js';
 import { moveFile }          from './moveFile.js';
+import { createFile }        from './createFile.js';
+import { writeFile }         from './writeFile.js';
+import { readFile }          from './readFile.js';
+import { renameFile }        from './renameFile.js';
 import { createDirectory }   from './createDirectory.js';
 import { organiseByRule }    from './organiseByRule.js';
 import { openSettings }      from './openSettings.js';
 import { screenAutomation }  from './screenAutomation.js';
+import { browserAutomation } from './browserAutomation.js';
 import { TOOL_NAMES, type ToolName } from '../llm/schema.js';
 
 type ToolArgs    = Record<string, unknown>;
@@ -17,12 +22,17 @@ const handlers: Record<ToolName, ToolHandler> = {
   findFile,
   deleteFile,
   moveFile,
+  createFile,
+  writeFile,
+  readFile,
+  renameFile,
   // openApplication delegates to screenAutomation so launches are always visible
   openApplication: (args) => screenAutomation({ action: 'launch', ...args }),
   createDirectory,
   organiseByRule,
   openSettings,
   screenAutomation,
+  browserAutomation,
 };
 
 /** Common shorthands the model may emit → canonical tool name. */
@@ -41,6 +51,13 @@ const ALIASES: Record<string, ToolName> = {
   move:           'moveFile',
   move_file:      'moveFile',
   rename:         'moveFile',
+  create_file:    'createFile',
+  new_file:       'createFile',
+  write_file:     'writeFile',
+  append_file:    'writeFile',
+  read_file:      'readFile',
+  cat:            'readFile',
+  rename_file:    'renameFile',
   // 'open' and 'launch' go through screenAutomation so the user sees Win+R
   open:           'screenAutomation',
   launch:         'screenAutomation',
@@ -66,6 +83,10 @@ const ALIASES: Record<string, ToolName> = {
   press_key:            'screenAutomation',
   scroll_screen:        'screenAutomation',
   find_on_screen:       'screenAutomation',
+  browser:              'browserAutomation',
+  browser_automation:   'browserAutomation',
+  web:                  'browserAutomation',
+  web_automation:       'browserAutomation',
 };
 
 /** Resolve an alias or canonical name to the registered ToolName, or return as-is. */

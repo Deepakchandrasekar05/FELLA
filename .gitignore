@@ -4,3 +4,4 @@ dist/
 bin/fella-win.exe
 bin/fella-linux
 bin/fella-macos
+GUIDE.md

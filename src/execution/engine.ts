@@ -13,6 +13,7 @@ import { executeTool, resolveToolName } from '../tools/registry.js';
 import { UndoStack }            from './history.js';
 import { buildPlan, executePlan, resolveSinceDate } from '../tools/organiseByRule.js';
 import { MemoryStore } from '../memory/store.js';
+import { defaultSearchRoots, defaultNavigateAliases } from '../platform/runtime.js';
 
 /** Soft-delete staging area — files are moved here instead of permanently removed. */
 const TRASH_DIR = join(tmpdir(), '.fella-trash');
@@ -31,8 +32,12 @@ interface PendingConfirmation {
 }
 
 interface PendingSelection {
-  kind: 'navigate-folder' | 'delete-folder';
+  kind: 'navigate-folder' | 'delete-folder' | 'open-file';
   options: string[];
+}
+
+interface PendingOpenClarification {
+  target: string;
 }
 
 const CONFIRM_WORDS = new Set(['yes', 'y', 'confirm', 'do it', 'proceed', 'ok', 'okay', 'sure']);
@@ -50,15 +55,7 @@ const ACKNOWLEDGEMENT_WORDS = new Set([
 
 const FOLDER_SEARCH_MAX_DEPTH = 8;
 const FOLDER_SEARCH_MAX_RESULTS = 8;
-const DEFAULT_SEARCH_DIRS = [
-  'downloads',
-  'documents',
-  'desktop',
-  'videos',
-  'pictures',
-  'music',
-  'd:',
-];
+const DEFAULT_SEARCH_DIRS = defaultSearchRoots();
 
 const SYSTEM_DIRS = new Set([
   'windows',
@@ -109,7 +106,7 @@ function scoreName(name: string, queryTokens: string[]): number {
   const tokens = tokenise(name);
   let hits = 0;
   for (const queryToken of queryTokens) {
-    if (tokens.some((token) => token.includes(queryToken) || queryToken.includes(token))) {
+    if (tokens.some((token) => token.includes(queryToken))) {
       hits += 1;
     }
   }
@@ -191,6 +188,107 @@ function buildFolderChoicePrompt(folderName: string, options: string[]): string 
   return `I found multiple folders named "${folderName}". Which one should I open?\n${lines.join('\n')}`;
 }
 
+function parseFindFilePaths(resultText: string): string[] {
+  const matches = [...resultText.matchAll(/Full path:\s*(.+)$/gim)];
+  const paths = matches
+    .map((match) => match[1]?.trim())
+    .filter((path): path is string => Boolean(path));
+
+  return paths.filter((path, index) => paths.indexOf(path) === index);
+}
+
+function buildFileChoicePrompt(target: string, options: string[]): string {
+  const lines = options.map((option, index) => `${index + 1}. ${option}`);
+  return `I found multiple file matches for "${target}". Which one should I open?\n${lines.join('\n')}`;
+}
+
+function looksLikeAppTarget(target: string): boolean {
+  const trimmed = target.trim();
+  if (!trimmed) return false;
+  if (/\sin\s+(chrome|chromium|edge|firefox|safari|browser)$/i.test(trimmed)) return false;
+  if (/^[a-z]:[\\/]/i.test(trimmed)) return false;
+  if (trimmed.startsWith('/') || trimmed.includes('\\') || trimmed.includes('/')) return false;
+  if (/\.(?:txt|pdf|docx?|xlsx?|pptx?|csv|jpg|jpeg|png|gif|webp|mp4|mkv|avi|mov|mp3|wav|zip|rar|7z|lnk)$/i.test(trimmed)) return false;
+
+  const words = trimmed.split(/\s+/).filter(Boolean);
+  if (words.length === 0 || words.length > 4) return false;
+
+  return /^[a-z0-9][a-z0-9 _.-]{0,40}$/i.test(trimmed);
+}
+
+function looksLikeWebTarget(target: string): boolean {
+  const trimmed = target.trim();
+  if (!trimmed) return false;
+  if (/^https?:\/\//i.test(trimmed)) return true;
+  if (trimmed.includes(' ')) return false;
+  return /\.[a-z]{2,}(?:[/:?#]|$)/i.test(trimmed);
+}
+
+function isChainedInstruction(text: string): boolean {
+  return /\b(and|then|after that|afterwards|next)\b|,/.test(text.toLowerCase());
+}
+
+function normaliseWebsiteTarget(target: string): string {
+  const trimmed = target.trim();
+  if (!trimmed) return trimmed;
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  if (/\.[a-z]{2,}(?:[/:?#]|$)/i.test(trimmed)) return trimmed;
+  if (/^[a-z0-9-]+$/i.test(trimmed)) return `${trimmed}.com`;
+  return trimmed;
+}
+
+function toKebabCase(input: string): string {
+  return input
+    .toLowerCase()
+    .replace(/['’]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .replace(/-+/g, '-');
+}
+
+function extractLeetCodeProblemName(text: string): string | null {
+  const patterns = [
+    /(?:named|called)\s+(.+?)(?:\s+in\s+leetcode(?:\.com)?|\s+on\s+leetcode(?:\.com)?|$)/i,
+    /\bin\s+\d+\.\s*([^.,]+?)\s+in\s+leetcode(?:\.com)?/i,
+    /problem\s+(.+?)(?:\s+in\s+leetcode(?:\.com)?|\s+on\s+leetcode(?:\.com)?|$)/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    const candidate = match?.[1]?.trim();
+    if (candidate) return candidate;
+  }
+
+  return null;
+}
+
+function buildLeetCodeUrlFromPrompt(text: string): string | null {
+  const lower = text.toLowerCase();
+  if (!lower.includes('leetcode')) return null;
+
+  const isSolutions = /\bsolution|solutions\b/i.test(text);
+  const wantsJava = /\bjava\b/i.test(text);
+
+  const explicitUrlMatch = text.match(/https?:\/\/leetcode\.com\/[^\s]+/i);
+  if (explicitUrlMatch?.[0]) return explicitUrlMatch[0];
+
+  const problemName = extractLeetCodeProblemName(text);
+  if (!problemName) {
+    // If no problem could be parsed, open LeetCode home instead of failing.
+    return 'https://leetcode.com/';
+  }
+
+  const slug = toKebabCase(problemName);
+  if (!slug) return 'https://leetcode.com/';
+
+  const base = `https://leetcode.com/problems/${slug}/`;
+  if (!isSolutions) return base;
+
+  return wantsJava
+    ? `${base}solutions/?language=java`
+    : `${base}solutions/`;
+}
+
 function generateSessionId(): string {
   const now = new Date();
   const date = now.toISOString().slice(0, 10).replace(/-/g, '');
@@ -229,6 +327,9 @@ export class Engine {
 
   /** Pending folder disambiguation awaiting a numeric selection. */
   private pendingSelection: PendingSelection | null = null;
+
+  /** Pending user clarification for ambiguous open intent target. */
+  private pendingOpenClarification: PendingOpenClarification | null = null;
 
   /** Undo / Redo stack — tracks reversible file operations. */
   private undoStack = new UndoStack();
@@ -515,7 +616,7 @@ export class Engine {
       return reply;
     }
 
-    if (!this.pendingConfirmation && !this.pendingSelection && ACKNOWLEDGEMENT_WORDS.has(trimmed)) {
+    if (!this.pendingConfirmation && !this.pendingSelection && !this.pendingOpenClarification && ACKNOWLEDGEMENT_WORDS.has(trimmed)) {
       const reply = trimmed === 'thanks' || trimmed === 'thank you' ? 'You can tell me the next thing to do.' : 'Okay.';
       this.history.push({ role: 'user', content: userMessage });
       this.history.push({ role: 'assistant', content: reply });
@@ -534,6 +635,15 @@ export class Engine {
           if (kind === 'delete-folder') {
             this.pendingConfirmation = { tool: 'deleteFile', args: { path: chosenPath } };
             reply = `Are you sure you want to permanently delete "${chosenPath}" and all its contents? (yes / no)`;
+          } else if (kind === 'open-file') {
+            try {
+              reply = await executeTool('screenAutomation', {
+                action: 'navigate',
+                path: chosenPath,
+              });
+            } catch (err) {
+              reply = `Open file error: ${err instanceof Error ? err.message : String(err)}`;
+            }
           } else {
             try {
               reply = await executeTool('screenAutomation', {
@@ -556,6 +666,7 @@ export class Engine {
 
       if (CANCEL_WORDS.has(trimmed)) {
         this.pendingSelection = null;
+        this.pendingOpenClarification = null;
         const reply = 'Cancelled.';
         this.history.push({ role: 'user', content: userMessage });
         this.history.push({ role: 'assistant', content: reply });
@@ -563,6 +674,257 @@ export class Engine {
       }
     }
     // ─────────────────────────────────────────────────────────────────────────
+
+    const leetCodeUrl = buildLeetCodeUrlFromPrompt(userMessage);
+    if (leetCodeUrl) {
+      this.history.push({ role: 'user', content: userMessage });
+      let reply: string;
+      try {
+        reply = await executeTool('browserAutomation', {
+          action: 'navigate',
+          url: leetCodeUrl,
+        });
+      } catch (err) {
+        reply = `Open LeetCode error: ${err instanceof Error ? err.message : String(err)}`;
+      }
+      this.history.push({ role: 'assistant', content: reply });
+      return reply;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+
+    if (this.pendingOpenClarification) {
+      const target = this.pendingOpenClarification.target;
+      const answer = trimmed;
+      this.history.push({ role: 'user', content: userMessage });
+
+      if (CANCEL_WORDS.has(answer)) {
+        this.pendingOpenClarification = null;
+        const reply = 'Cancelled.';
+        this.history.push({ role: 'assistant', content: reply });
+        return reply;
+      }
+
+      if (/\b(setting|settings|control panel)\b/i.test(answer)) {
+        this.pendingOpenClarification = null;
+        let reply: string;
+        try {
+          reply = await executeTool('openSettings', { setting: target });
+        } catch {
+          reply = `I couldn't find a settings page named "${target}" on this system.`;
+        }
+        this.history.push({ role: 'assistant', content: reply });
+        return reply;
+      }
+
+      if (/\b(folder|directory)\b/i.test(answer)) {
+        this.pendingOpenClarification = null;
+        const folders = findFoldersByName(target);
+        if (folders.length === 0) {
+          const reply = `I couldn't find a folder named "${target}" on this system.`;
+          this.history.push({ role: 'assistant', content: reply });
+          return reply;
+        }
+        if (folders.length === 1) {
+          let reply: string;
+          try {
+            reply = await executeTool('screenAutomation', { action: 'navigate', path: folders[0] });
+          } catch (err) {
+            reply = `Navigate error: ${err instanceof Error ? err.message : String(err)}`;
+          }
+          this.history.push({ role: 'assistant', content: reply });
+          return reply;
+        }
+        this.pendingSelection = { kind: 'navigate-folder', options: folders };
+        const reply = buildFolderChoicePrompt(target, folders);
+        this.history.push({ role: 'assistant', content: reply });
+        return reply;
+      }
+
+      if (/\b(file|shortcut|notepad|text)\b/i.test(answer)) {
+        this.pendingOpenClarification = null;
+        let reply: string;
+        try {
+          const lookup = await executeTool('findFile', {
+            query: target,
+            sort_by: 'recent',
+            max_results: 8,
+          });
+          const filePaths = parseFindFilePaths(lookup);
+          if (filePaths.length === 0) {
+            reply = `I couldn't find a file or shortcut named "${target}" on this system.`;
+          } else if (filePaths.length === 1) {
+            reply = await executeTool('screenAutomation', {
+              action: 'navigate',
+              path: filePaths[0],
+            });
+          } else {
+            this.pendingSelection = { kind: 'open-file', options: filePaths };
+            reply = buildFileChoicePrompt(target, filePaths);
+          }
+        } catch (err) {
+          reply = `Open file error: ${err instanceof Error ? err.message : String(err)}`;
+        }
+        this.history.push({ role: 'assistant', content: reply });
+        return reply;
+      }
+
+      if (/\b(app|application|program|exe)\b/i.test(answer)) {
+        this.pendingOpenClarification = null;
+        let reply: string;
+        try {
+          reply = await executeTool('screenAutomation', { action: 'launch', app: target });
+        } catch {
+          reply = `I couldn't find an application named "${target}" on this system.`;
+        }
+        this.history.push({ role: 'assistant', content: reply });
+        return reply;
+      }
+
+      const reply = `Please tell me what "${target}" is: application, folder, file/shortcut, or setting.`;
+      this.history.push({ role: 'assistant', content: reply });
+      return reply;
+    }
+
+    const genericOpenMatch = userMessage.trim().match(/^open\s+(.+)$/i);
+    const isRecentDownloadOpen = genericOpenMatch
+      ? /^(?:the\s+)?(?:last(?:ly|est)?\s+downloaded|latest\s+downloaded|most\s+recent(?:ly)?\s+downloaded|recently\s+downloaded)\b/i.test(genericOpenMatch[1]!.trim())
+      : false;
+    const isSimpleOpen = genericOpenMatch ? !isChainedInstruction(genericOpenMatch[1]!.trim()) : false;
+    if (genericOpenMatch && !isRecentDownloadOpen && isSimpleOpen) {
+      const target = genericOpenMatch[1]!.trim();
+      this.history.push({ role: 'user', content: userMessage });
+
+      const openInBrowserMatch = target.match(/^(.+?)\s+in\s+(chrome|chromium|edge|firefox|safari|browser)$/i);
+      if (openInBrowserMatch) {
+        const rawSite = openInBrowserMatch[1]!.trim();
+        const browserName = openInBrowserMatch[2]!.trim();
+        const url = normaliseWebsiteTarget(rawSite);
+
+        if (!looksLikeWebTarget(url) && !/^[a-z0-9-]+\.[a-z]{2,}$/i.test(url)) {
+          const reply = `I couldn't identify "${rawSite}" as a website. Please provide a URL like github.com.`;
+          this.history.push({ role: 'assistant', content: reply });
+          return reply;
+        }
+
+        let reply: string;
+        try {
+          reply = await executeTool('browserAutomation', { action: 'navigate', url });
+          reply += ` (using Playwright Chromium; requested browser: ${browserName})`;
+        } catch (err) {
+          reply = `Open website error: ${err instanceof Error ? err.message : String(err)}`;
+        }
+        this.history.push({ role: 'assistant', content: reply });
+        return reply;
+      }
+
+      const settingRequest = extractSettingRequest(userMessage);
+      if (settingRequest) {
+        let reply: string;
+        try {
+          reply = await executeTool('openSettings', { setting: settingRequest });
+        } catch (err) {
+          reply = `Open settings error: ${err instanceof Error ? err.message : String(err)}`;
+        }
+        this.history.push({ role: 'assistant', content: reply });
+        return reply;
+      }
+
+      if (looksLikeWebTarget(target)) {
+        let reply: string;
+        try {
+          reply = await executeTool('browserAutomation', { action: 'navigate', url: target });
+        } catch (err) {
+          reply = `Open website error: ${err instanceof Error ? err.message : String(err)}`;
+        }
+        this.history.push({ role: 'assistant', content: reply });
+        return reply;
+      }
+
+      try {
+        const resolvedTarget = resolvePath(target);
+        if (existsSync(resolvedTarget)) {
+          const reply = await executeTool('screenAutomation', {
+            action: 'navigate',
+            path: resolvedTarget,
+          });
+          this.history.push({ role: 'assistant', content: reply });
+          return reply;
+        }
+      } catch {
+        // Not a valid alias/path target; continue with search strategies.
+      }
+
+      if (looksLikeAppTarget(target)) {
+        try {
+          const reply = await executeTool('screenAutomation', { action: 'launch', app: target });
+          this.history.push({ role: 'assistant', content: reply });
+          return reply;
+        } catch {
+          // App launch failed; continue with folder/file search.
+        }
+      }
+
+      const folderMatches = findFoldersByName(target);
+      if (folderMatches.length === 1) {
+        let reply: string;
+        try {
+          reply = await executeTool('screenAutomation', { action: 'navigate', path: folderMatches[0] });
+        } catch (err) {
+          reply = `Navigate error: ${err instanceof Error ? err.message : String(err)}`;
+        }
+        this.history.push({ role: 'assistant', content: reply });
+        return reply;
+      }
+      if (folderMatches.length > 1) {
+        this.pendingSelection = { kind: 'navigate-folder', options: folderMatches };
+        const reply = buildFolderChoicePrompt(target, folderMatches);
+        this.history.push({ role: 'assistant', content: reply });
+        return reply;
+      }
+
+      try {
+        const lookup = await executeTool('findFile', {
+          query: target,
+          sort_by: 'recent',
+          max_results: 8,
+        });
+        const filePaths = parseFindFilePaths(lookup);
+
+        if (filePaths.length === 1) {
+          const reply = await executeTool('screenAutomation', {
+            action: 'navigate',
+            path: filePaths[0],
+          });
+          this.history.push({ role: 'assistant', content: reply });
+          return reply;
+        }
+
+        if (filePaths.length > 1) {
+          this.pendingSelection = { kind: 'open-file', options: filePaths };
+          const reply = buildFileChoicePrompt(target, filePaths);
+          this.history.push({ role: 'assistant', content: reply });
+          return reply;
+        }
+      } catch {
+        // Ignore search errors and continue to app-launch fallback.
+      }
+
+      if (looksLikeAppTarget(target)) {
+        try {
+          const reply = await executeTool('screenAutomation', { action: 'launch', app: target });
+          this.history.push({ role: 'assistant', content: reply });
+          return reply;
+        } catch {
+          // Fall through to clarification.
+        }
+      }
+
+      this.pendingOpenClarification = { target };
+      const reply = `I couldn't identify "${target}" yet. Is it an application, folder, file/shortcut, or setting?`;
+      this.history.push({ role: 'assistant', content: reply });
+      return reply;
+    }
 
     const openFolderMatch = userMessage
       .trim()
@@ -667,18 +1029,12 @@ export class Engine {
       );
 
     // Known folder names for the plain "navigate to X" bypass
-    const FOLDER_ALIASES = new Set([
-      'downloads', 'download', 'documents', 'document', 'docs',
-      'desktop', 'pictures', 'picture', 'photos', 'music',
-      'videos', 'video', 'movies', 'temp', 'tmp', 'home',
-      'appdata', 'localappdata', 'd:', 'droot',
-      // Windows virtual / shell folders
-      'recyclebin', 'trash', 'thispc', 'mycomputer', 'controlpanel', 'network',
-    ]);
+    const FOLDER_ALIASES = new Set(defaultNavigateAliases());
     if (navigateMatch) {
       const target = navigateMatch[1]!.trim().toLowerCase().replace(/\s+/g, '');
       const isKnownFolder = FOLDER_ALIASES.has(target)
-        || /^[a-z]:[\\\/]/.test(navigateMatch[1]!.trim());   // absolute path
+        || /^[a-z]:[\\\/]/i.test(navigateMatch[1]!.trim())
+        || navigateMatch[1]!.trim().startsWith('/');
       if (isKnownFolder) {
         this.history.push({ role: 'user', content: userMessage });
         let reply: string;
@@ -869,6 +1225,7 @@ export class Engine {
     this.history = [];
     this.pendingConfirmation = null;
     this.pendingSelection = null;
+    this.pendingOpenClarification = null;
     this.undoStack.clear();
     this.lastSavedIdx = 0;
   }
