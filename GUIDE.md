@@ -712,6 +712,7 @@ This section is intentionally explicit so you can learn the stack.
 - `better-sqlite3`: synchronous SQLite driver (local persistence)
 - `execa`: child process spawning wrapper for OS commands
 - `playwright`: browser automation (Chromium)
+- `chromium-bidi`: Playwright internal dependency used for BiDi support (required for bundlers that statically resolve Playwright’s `require('chromium-bidi/...')` paths)
 - `dotenv`: load `.env` files
 - `@nut-tree-fork/nut-js`: screen automation (OCR, mouse, keyboard)
 
@@ -1748,4 +1749,3 @@ This is the practical way to keep feature parity while remaining platform-indepe
 Next step I recommend
 
 I can now add a CI OS matrix (Windows/macOS/Linux) with smoke tests for tool actions so cross-platform behavior is continuously verified.
-GPT-5.3-Codex • 1x
