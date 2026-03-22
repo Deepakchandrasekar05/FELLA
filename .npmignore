@@ -21,3 +21,16 @@ dist/*.map
 # large runtime assets not needed by npm users
 assets/page.png
 assets/*.png.bak
+
+# ── ADD THESE LINES ───────────────────────────────────────────────────────────
+# Large exe and binary files — never publish these to npm
+dist/*.exe
+dist/*.blob
+dist/node.exe
+dist/node-sea-base*.exe
+dist/sea-mjs-test*
+dist/sea-main.mjs
+dist/sea-entry.cjs
+dist/fella-stub.exe
+dist/_sign.ps1
+sea-config-mjs-test.json
