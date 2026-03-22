@@ -70,6 +70,7 @@ export default function App({ isAuthenticated, sessionId, onRequestAuth }: Props
   const [messages, setMessages]     = useState<Message[]>(initialMessages);
   const [input, setInput]           = useState('');
   const [isThinking, setIsThinking] = useState(false);
+  const [assistantLabel, setAssistantLabel] = useState<string>(engineRef.current.getAssistantLabel());
 
   const currentSessionId = engineRef.current.id;
 
@@ -214,6 +215,7 @@ export default function App({ isAuthenticated, sessionId, onRequestAuth }: Props
           };
 
           setMessages((prev) => [...prev, stepMessage]);
+          setAssistantLabel(engineRef.current.getAssistantLabel());
         })
         .then((reply) => {
           const assistantMsg: Message = {
@@ -223,6 +225,7 @@ export default function App({ isAuthenticated, sessionId, onRequestAuth }: Props
             timestamp: new Date(),
           };
           setMessages((prev) => [...prev, assistantMsg]);
+          setAssistantLabel(engineRef.current.getAssistantLabel());
         })
         .catch((err: unknown) => {
           const errorMsg: Message = {
@@ -232,9 +235,11 @@ export default function App({ isAuthenticated, sessionId, onRequestAuth }: Props
             timestamp: new Date(),
           };
           setMessages((prev) => [...prev, errorMsg]);
+          setAssistantLabel(engineRef.current.getAssistantLabel());
         })
         .finally(() => {
           setIsThinking(false);
+          setAssistantLabel(engineRef.current.getAssistantLabel());
         });
     },
     [isThinking],
@@ -266,6 +271,7 @@ export default function App({ isAuthenticated, sessionId, onRequestAuth }: Props
           <MessageList
             messages={messages}
             isThinking={isThinking}
+            assistantLabel={assistantLabel}
           />
         </>
       )}

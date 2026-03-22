@@ -5,7 +5,8 @@
 // All other actions (screenshot, OCR, click, type…) use nut-js loaded lazily.
 
 import { execa } from 'execa';
-import { writeFileSync, unlinkSync } from 'fs';
+import { spawn } from 'node:child_process';
+import { existsSync, statSync, writeFileSync, unlinkSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { resolvePath } from '../security/pathGuard.js';
@@ -142,7 +143,28 @@ const NON_WINDOWS_APP_MAP: Record<string, { darwin?: string; linux?: string }> =
 
 async function openPathWithDefault(pathOrUri: string): Promise<void> {
   if (process.platform === 'win32') {
-    await execa('cmd', ['/c', 'start', '', pathOrUri], { reject: false });
+    const isShellUri = /^shell:/i.test(pathOrUri) || /^control$/i.test(pathOrUri);
+    const exists = existsSync(pathOrUri);
+    const isDirectory = exists ? statSync(pathOrUri).isDirectory() : false;
+
+    if (isShellUri || isDirectory) {
+      const child = spawn('explorer.exe', [pathOrUri], {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: false,
+        shell: false,
+      });
+      child.unref();
+      return;
+    }
+
+    const child = spawn('cmd', ['/c', 'start', '', pathOrUri], {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: false,
+      shell: false,
+    });
+    child.unref();
     return;
   }
   if (process.platform === 'darwin') {
@@ -486,6 +508,65 @@ async function actionNavigate(
   return `Navigated to "${folderPath}"`;
 }
 
+async function actionCloseFolder(args: Record<string, unknown>): Promise<string> {
+  if (process.platform !== 'win32') {
+    throw new Error('close_folder is currently supported on Windows only');
+  }
+
+  const rawPath = String(args['path'] ?? '').trim();
+  const normalizedPath = rawPath
+    ? rawPath.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase()
+    : '';
+
+  const safePath = normalizedPath.replace(/'/g, "''");
+  const script = [
+    `$target = '${safePath}'`,
+    `$shell = New-Object -ComObject Shell.Application`,
+    `$wins = @($shell.Windows())`,
+    `$closed = 0`,
+    `foreach ($w in $wins) {`,
+    `  try {`,
+    `    $name = [string]$w.FullName`,
+    `    if (-not $name.ToLower().EndsWith('explorer.exe')) { continue }`,
+    `    $loc = [string]$w.LocationURL`,
+    `    if ([string]::IsNullOrWhiteSpace($loc)) { continue }`,
+    `    $localPath = $null`,
+    `    try { $localPath = [uri]::UnescapeDataString(($loc -replace '^file:///', '')) } catch { $localPath = $null }`,
+    `    if ($localPath) { $localPath = ($localPath -replace '/', '\\').TrimEnd('\\').ToLower() }`,
+    `    if ([string]::IsNullOrEmpty($target) -or ($localPath -eq $target)) {`,
+    `      $w.Quit()`,
+    `      $closed++`,
+    `    }`,
+    `  } catch { }`,
+    `}`,
+    `Write-Output $closed`,
+  ].join('\r\n');
+
+  const tmpScript = join(tmpdir(), `fella-close-folder-${Date.now()}.ps1`);
+  writeFileSync(tmpScript, script, 'utf8');
+  try {
+    const { stdout } = await execa('powershell.exe', [
+      '-NoProfile',
+      '-NonInteractive',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-File',
+      tmpScript,
+    ]);
+    const closed = Number.parseInt(stdout.trim(), 10);
+    if (Number.isFinite(closed) && closed > 0) {
+      return rawPath
+        ? `Closed folder window for "${rawPath}".`
+        : `Closed ${closed} Explorer window(s).`;
+    }
+    return rawPath
+      ? `No open Explorer window found for "${rawPath}".`
+      : 'No open Explorer window found to close.';
+  } finally {
+    try { unlinkSync(tmpScript); } catch { /* ignore */ }
+  }
+}
+
 // â”€â”€ Public tool handler â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
@@ -493,7 +574,7 @@ async function actionNavigate(
  *
  * args:
  *   action     — required: screenshot | find_text | move | click | double_click
- *                           | type | key | hotkey | scroll | navigate
+ *                           | type | key | hotkey | scroll | navigate | close_folder
  *   target     — text to locate with OCR (for find_text / move / click)
  *   x, y       — pixel coordinates (for move / click)
  *   text       — string to type (for type action)
@@ -504,6 +585,7 @@ async function actionNavigate(
  *   amount     — number of scroll steps (for scroll, default 3)
  *   path       — folder path alias or absolute path (for navigate)
  *   file       — filename to open after navigating (for navigate, optional)
+ *   path       — optional folder path to close the matching Explorer window (for close_folder)
  */
 export async function screenAutomation(
   args: Record<string, unknown>,
@@ -589,10 +671,14 @@ export async function screenAutomation(
         return await actionNavigate(args);
       }
 
+      case 'close_folder': {
+        return await actionCloseFolder(args);
+      }
+
       default:
         throw new Error(
           `Unknown action "${action}". Valid actions: ` +
-          'launch, screenshot, find_text, move, click, double_click, type, key, hotkey, scroll, navigate',
+          'launch, screenshot, find_text, move, click, double_click, type, key, hotkey, scroll, navigate, close_folder',
         );
     }
   } catch (err) {

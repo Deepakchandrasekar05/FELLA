@@ -14,6 +14,7 @@ export type Message = {
 type Props = {
   messages: Message[];
   isThinking: boolean;
+  assistantLabel?: string;
 };
 
 const ROLE_STYLES: Record<
@@ -26,8 +27,14 @@ const ROLE_STYLES: Record<
   error:     { prefix: '✕',  prefixColor: '#FF6B6B', textColor: '#FF6B6B' },
 };
 
-function MessageItem({ message }: { message: Message }) {
+function sanitizeForTuiLabel(label: string): string {
+  // Display-only masking: hide the username segment in Windows home paths.
+  return label.replace(/C:\\Users\\[^\\)]+/gi, 'C:\\Users');
+}
+
+function MessageItem({ message, assistantLabel }: { message: Message; assistantLabel: string }) {
   const style = ROLE_STYLES[message.role];
+  const visibleAssistantLabel = sanitizeForTuiLabel(assistantLabel);
 
   return (
     <Box flexDirection="row" marginBottom={1} gap={1}>
@@ -43,7 +50,7 @@ function MessageItem({ message }: { message: Message }) {
         {/* Role label for non-system messages */}
         {message.role !== 'system' && (
           <Text color={style.prefixColor} bold dimColor={message.role === 'assistant'}>
-            {message.role === 'user' ? 'you' : 'fella'}
+            {message.role === 'user' ? 'you' : visibleAssistantLabel}
           </Text>
         )}
         <Text color={style.textColor} wrap="wrap">
@@ -70,11 +77,11 @@ function ThinkingIndicator() {
   );
 }
 
-export default function MessageList({ messages, isThinking }: Props) {
+export default function MessageList({ messages, isThinking, assistantLabel = 'fella' }: Props) {
   return (
     <Box flexDirection="column" flexGrow={1} paddingX={1} marginBottom={1}>
       {messages.map((msg) => (
-        <MessageItem key={msg.id} message={msg} />
+        <MessageItem key={msg.id} message={msg} assistantLabel={assistantLabel} />
       ))}
       {isThinking && <ThinkingIndicator />}
     </Box>

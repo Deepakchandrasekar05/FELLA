@@ -91,8 +91,8 @@ function isPathInside(absPath: string, root: string): boolean {
   const resolvedPath = normalize(resolve(absPath));
   const resolvedRoot = normalize(resolve(root));
   if (process.platform === 'win32') {
-    const p = resolvedPath.toUpperCase();
-    const r = resolvedRoot.toUpperCase();
+    const p = resolvedPath.toUpperCase().replace(/[\\/]+$/, '');
+    const r = resolvedRoot.toUpperCase().replace(/[\\/]+$/, '');
     return p === r || p.startsWith(`${r}\\`) || p.startsWith(`${r}/`);
   }
   return resolvedPath === resolvedRoot || resolvedPath.startsWith(`${resolvedRoot}/`);

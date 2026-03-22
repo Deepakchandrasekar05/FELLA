@@ -3,15 +3,16 @@ import { listFiles }         from './listFiles.js';
 import { findFile }          from './findFile.js';
 import { deleteFile }        from './deleteFile.js';
 import { moveFile }          from './moveFile.js';
-import { createFile }        from './createFile.js';
-import { writeFile }         from './writeFile.js';
+import { openApplication }   from './openApplication.js';
+import { createFile }        from './createFile';
+import { writeFile }         from './writeFile';
 import { readFile }          from './readFile.js';
-import { renameFile }        from './renameFile.js';
+import { renameFile }        from './renameFile';
 import { createDirectory }   from './createDirectory.js';
 import { organiseByRule }    from './organiseByRule.js';
 import { openSettings }      from './openSettings.js';
 import { screenAutomation }  from './screenAutomation.js';
-import { browserAutomation } from './browserAutomation.js';
+import { browserAutomation } from './browserAutomation';
 import { TOOL_NAMES, type ToolName } from '../llm/schema.js';
 
 type ToolArgs    = Record<string, unknown>;
@@ -26,8 +27,7 @@ const handlers: Record<ToolName, ToolHandler> = {
   writeFile,
   readFile,
   renameFile,
-  // openApplication delegates to screenAutomation so launches are always visible
-  openApplication: (args) => screenAutomation({ action: 'launch', ...args }),
+  openApplication,
   createDirectory,
   organiseByRule,
   openSettings,
@@ -44,6 +44,8 @@ const ALIASES: Record<string, ToolName> = {
   list:           'listFiles',
   list_files:     'listFiles',
   ls:             'listFiles',
+  readdir:        'listFiles',
+  'fs.readdir':   'listFiles',
   delete:         'deleteFile',
   delete_file:    'deleteFile',
   remove:         'deleteFile',
@@ -85,13 +87,26 @@ const ALIASES: Record<string, ToolName> = {
   find_on_screen:       'screenAutomation',
   browser:              'browserAutomation',
   browser_automation:   'browserAutomation',
+  playwright:           'browserAutomation',
   web:                  'browserAutomation',
   web_automation:       'browserAutomation',
 };
 
 /** Resolve an alias or canonical name to the registered ToolName, or return as-is. */
 export function resolveToolName(tool: string): string {
-  return ALIASES[tool] ?? tool;
+  const t = String(tool ?? '').trim();
+  if (!t) return t;
+
+  // Preserve exact canonical names first.
+  if ((TOOL_NAMES as readonly string[]).includes(t)) {
+    return t;
+  }
+
+  const lower = t.toLowerCase();
+  const withoutFs = lower.startsWith('fs.') ? lower.slice(3) : lower;
+  const canonicalByLower = (TOOL_NAMES as readonly string[]).find((name) => name.toLowerCase() === withoutFs);
+  const resolved = ALIASES[t] ?? ALIASES[lower] ?? ALIASES[withoutFs] ?? canonicalByLower ?? withoutFs;
+  return resolved || t;
 }
 
 /**
@@ -100,7 +115,8 @@ export function resolveToolName(tool: string): string {
  * Throws if the tool name is not registered.
  */
 export async function executeTool(tool: string, args: ToolArgs): Promise<string> {
-  const resolved = (ALIASES[tool] ?? tool) as ToolName;
+  const normalized = resolveToolName(tool);
+  const resolved = normalized as ToolName;
   if (!TOOL_NAMES.includes(resolved)) {
     throw new Error(`Unknown tool: "${tool}". Available: ${TOOL_NAMES.join(', ')}`);
   }

@@ -1,6 +1,7 @@
 import { resolve, dirname } from 'node:path';
 import { realpathSync }     from 'node:fs';
 import { fileURLToPath }    from 'node:url';
+import { execSync }         from 'node:child_process';
 import dotenv               from 'dotenv';
 import { render }           from 'ink';
 import App                  from './ui/App.js';
@@ -22,6 +23,16 @@ const candidates = [
 for (const envPath of candidates) {
   const result = dotenv.config({ path: envPath, quiet: true, override: true });
   if (!result.error) break;
+}
+
+// Warm the MCP package cache so the first browser action starts faster.
+try {
+  execSync('npx --yes chrome-devtools-mcp@latest --version', {
+    timeout: 30_000,
+    stdio: 'ignore',
+  });
+} catch {
+  // Non-fatal: first browser command may be slower if prewarm fails.
 }
 
 // ── Auth CLI commands ─────────────────────────────────────────────────────────

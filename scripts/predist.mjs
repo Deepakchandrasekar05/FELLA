@@ -9,7 +9,7 @@
  */
 
 import { execSync }             from 'child_process';
-import { writeFileSync, mkdirSync, appendFileSync, copyFileSync, existsSync, cpSync } from 'fs';
+import { writeFileSync, mkdirSync, appendFileSync, copyFileSync, existsSync, cpSync, readFileSync } from 'fs';
 import { join, dirname }        from 'path';
 import { fileURLToPath }        from 'url';
 
@@ -20,27 +20,72 @@ const distDir   = join(root, 'dist');
 // Ensure dist/ exists (build may not have run yet)
 mkdirSync(distDir, { recursive: true });
 
-// Write a minimal package.json into dist/ so npm has a valid install target.
-// private:true prevents it from being accidentally published.
-// type:module tells Node that index.js is ESM — no reparse warning.
-writeFileSync(
-  join(distDir, 'package.json'),
-  JSON.stringify({ name: 'fella-runtime', version: '1.0.0', private: true, type: 'module' }, null, 2) + '\n',
-);
+// Write a runtime package.json into dist/.
+// This is important: caxa runs `npm dedupe --production` on its build directory.
+// If dist/package.json has no dependencies, caxa will prune most of dist/node_modules,
+// causing packaged builds to crash with ERR_MODULE_NOT_FOUND.
+const rootPkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+const rootDeps = rootPkg?.dependencies ?? {};
 
-// Install every package that esbuild marks --external into dist/node_modules/.
-// npm resolves the full transitive dep tree so nothing is missing at runtime.
-const PACKAGES = [
+const REQUIRED_DEPS = [
   '@nut-tree-fork/nut-js',
   'better-sqlite3',
   'trash',
-].join(' ');
+  'playwright',
+];
 
-console.log('▸ Installing native packages into dist/node_modules/ …');
-execSync(`npm install --prefix dist --omit=dev --no-save ${PACKAGES}`, {
+const distDeps = Object.fromEntries(
+  REQUIRED_DEPS.map((name) => [name, rootDeps[name] ?? '*']),
+);
+
+writeFileSync(
+  join(distDir, 'package.json'),
+  JSON.stringify(
+    { name: 'fella-runtime', version: '1.0.0', private: true, type: 'module', dependencies: distDeps },
+    null,
+    2,
+  ) + '\n',
+);
+
+console.log('▸ Installing runtime packages into dist/node_modules/ …');
+// Use explicit installs with --no-save to avoid npm rewriting dist/package.json
+// to include a self-link dependency like "fella-cli": "file:..".
+execSync(`npm install --prefix dist --omit=dev --no-save ${REQUIRED_DEPS.join(' ')}`, {
   stdio: 'inherit',
   cwd: root,
+  env: {
+    ...process.env,
+    PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1',
+  },
 });
+
+// Defensive: remove any accidental self-link dependency that could cause caxa's
+// internal npm operations to attempt a symlink back to the repo (EPERM on Windows).
+try {
+  const distPkgPath = join(distDir, 'package.json');
+  const distPkg = JSON.parse(readFileSync(distPkgPath, 'utf8'));
+  const selfName = String(rootPkg?.name ?? '').trim();
+  if (selfName && distPkg?.dependencies?.[selfName]) {
+    delete distPkg.dependencies[selfName];
+    writeFileSync(distPkgPath, JSON.stringify(distPkg, null, 2) + '\n');
+    console.log(`✔  Removed self-link dependency from dist/package.json: ${selfName}`);
+  }
+} catch {
+  // Non-fatal.
+}
+
+// Copy the Node runtime into dist/ so the packaged .exe can launch even
+// on machines without Node installed or without PATH available in GUI.
+if (process.platform === 'win32') {
+  try {
+    const nodeExe = process.execPath;
+    const target = join(distDir, 'node.exe');
+    copyFileSync(nodeExe, target);
+    console.log('✔  Node runtime copied → dist/node.exe');
+  } catch {
+    console.log('✖  Could not copy Node runtime into dist/. The packaged exe may require Node on PATH.');
+  }
+}
 
 // Copy assets into dist/ so caxa bundles them inside the exe
 const assetsDir = join(root, 'assets');

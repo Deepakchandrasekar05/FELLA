@@ -9,6 +9,10 @@ import { defaultSearchRoots } from '../platform/runtime.js';
 
 const MAX_DEPTH   = 8;   // deep enough for D:\College\College\sem3\OOPS\file.pdf
 const MAX_RESULTS = 8;
+const QUERY_STOPWORDS = new Set([
+  'the', 'a', 'an', 'in', 'on', 'at', 'to', 'for', 'from', 'of', 'and',
+  'it', 'this', 'that', 'using', 'with', 'open', 'play', 'use',
+]);
 
 /** Default folders to search when no dir is specified. */
 const DEFAULT_DIRS = defaultSearchRoots();
@@ -31,6 +35,17 @@ function tokenise(name: string): string[] {
     .filter(t => t.length > 1);
 }
 
+function queryTokensFrom(raw: string): string[] {
+  const base = raw
+    .toLowerCase()
+    .replace(/[^a-z0-9\s_-]+/g, ' ')
+    .split(/[\s_-]+/)
+    .filter((t) => t.length > 0);
+
+  const filtered = base.filter((t) => !QUERY_STOPWORDS.has(t));
+  return filtered.length > 0 ? filtered : base;
+}
+
 /**
  * Score how well `name` matches `queryTokens`.
  * Returns 0–1; 1 = every query token found.
@@ -45,11 +60,23 @@ function score(name: string, queryTokens: string[]): number {
   return hits / queryTokens.length;
 }
 
+function isStrongEnoughScore(s: number, queryTokenCount: number): boolean {
+  if (queryTokenCount <= 1) return s > 0;
+  if (queryTokenCount === 2) return s >= 0.5;
+  return s >= 0.4;
+}
+
 interface Match {
   path:  string;
   name:  string;
   score: number;
   mtime: number;
+}
+
+interface FolderMatch {
+  path: string;
+  name: string;
+  score: number;
 }
 
 /**
@@ -82,6 +109,10 @@ const JUNK_DIRS = new Set([
   '$recycle.bin',
   '$recycler',
   'node_modules',
+  'venv',
+  '.venv',
+  '__pycache__',
+  'site-packages',
   '.git',
   '.svn',
   '.hg',
@@ -92,6 +123,16 @@ const JUNK_DIRS = new Set([
 
 function isJunk(name: string): boolean {
   return JUNK_DIRS.has(name.toLowerCase()) || name.startsWith('$') || name.startsWith('.');
+}
+
+function folderHintMatches(name: string, hintTokens: string[]): boolean {
+  if (hintTokens.length === 0) return true;
+  const folderTokens = tokenise(name);
+  return hintTokens.every((hint) =>
+    folderTokens.some((folderToken) =>
+      folderToken === hint || folderToken.startsWith(hint) || hint.startsWith(folderToken + 's'),
+    ),
+  );
 }
 
 function walk(
@@ -123,7 +164,7 @@ function walk(
       // Skip junk directories on the clean pass
       if (skipJunk && isJunk(name)) continue;
       // Does this subfolder name match the hint?
-      const thisMatches = folderHintTokens ? score(name, folderHintTokens) >= 0.5 : false;
+      const thisMatches = folderHintTokens ? folderHintMatches(name, folderHintTokens) : false;
       walk(full, queryTokens, allowedExts, folderHintTokens, depth + 1, results,
         insideMatchingFolder || thisMatches, skipJunk);
       continue;
@@ -137,11 +178,44 @@ function walk(
 
     // File name score (empty queryTokens → score 1 = any file qualifies)
     const s = score(name, queryTokens);
-    if (s > 0) {
+    if (isStrongEnoughScore(s, queryTokens.length)) {
       let mtime = 0;
       try { mtime = statSync(full).mtimeMs; } catch { /* ignore */ }
       results.push({ path: full, name, score: s, mtime });
     }
+  }
+}
+
+function walkFoldersByName(
+  dir: string,
+  queryTokens: string[],
+  depth: number,
+  results: FolderMatch[],
+  skipJunk: boolean,
+): void {
+  if (depth > MAX_DEPTH) return;
+
+  let entries: import('node:fs').Dirent<string>[];
+  try {
+    entries = readdirSync(dir, { withFileTypes: true }) as import('node:fs').Dirent<string>[];
+  } catch {
+    return;
+  }
+
+  for (const e of entries) {
+    if (!e.isDirectory()) continue;
+
+    const name = String(e.name);
+    if (isSystem(name)) continue;
+    if (skipJunk && isJunk(name)) continue;
+
+    const full = join(dir, name);
+    const s = score(name, queryTokens);
+    if (s > 0) {
+      results.push({ path: full, name, score: s });
+    }
+
+    walkFoldersByName(full, queryTokens, depth + 1, results, skipJunk);
   }
 }
 
@@ -159,9 +233,11 @@ function walk(
  *   max_results?  — max hits to return (default 8)
  */
 export async function findFile(args: Record<string, unknown>): Promise<string> {
-  const query      = String(args['query']       ?? '').trim();
-  const folderHint = String(args['folder_hint'] ?? '').trim();
-  const dirArg     = args['dir']         != null ? String(args['dir'])             : null;
+  const queryLike = args['query'] ?? args['pattern'] ?? '';
+  const query      = String(queryLike === '*' ? '' : queryLike).trim();
+  const folderHint = String(args['folder_hint'] ?? args['folder_name'] ?? '').trim();
+  const dirArgRaw  = args['dir'] ?? args['path'] ?? args['search_path'] ?? null;
+  const dirArg     = dirArgRaw != null ? String(dirArgRaw) : null;
   const sortBy     = String(args['sort_by']     ?? 'score').trim();
   const maxResults = typeof args['max_results'] === 'number' ? args['max_results'] : MAX_RESULTS;
   const rawExts    = Array.isArray(args['extensions']) ? args['extensions'] as string[] : null;
@@ -170,7 +246,7 @@ export async function findFile(args: Record<string, unknown>): Promise<string> {
     ? new Set(rawExts.map(e => e.startsWith('.') ? e.toLowerCase() : `.${e.toLowerCase()}`))
     : null;
 
-  const queryTokens      = query.toLowerCase().split(/\s+/).filter(t => t.length > 0);
+  const queryTokens      = queryTokensFrom(query);
   const folderHintTokens = folderHint.length > 0
     ? folderHint.toLowerCase().split(/\s+/).filter(t => t.length > 0)
     : null;
@@ -191,7 +267,7 @@ export async function findFile(args: Record<string, unknown>): Promise<string> {
   const results: Match[] = [];
   for (const dir of searchDirs) {
     const rootMatches = folderHintTokens
-      ? score(basename(dir), folderHintTokens) >= 0.5
+      ? folderHintMatches(basename(dir), folderHintTokens)
       : false;
     walk(dir, queryTokens, allowedExts, folderHintTokens, 0, results, rootMatches, true);
   }
@@ -200,7 +276,7 @@ export async function findFile(args: Record<string, unknown>): Promise<string> {
   if (results.length === 0) {
     for (const dir of searchDirs) {
       const rootMatches = folderHintTokens
-        ? score(basename(dir), folderHintTokens) >= 0.5
+        ? folderHintMatches(basename(dir), folderHintTokens)
         : false;
       walk(dir, queryTokens, allowedExts, folderHintTokens, 0, results, rootMatches, false);
     }
@@ -224,9 +300,33 @@ export async function findFile(args: Record<string, unknown>): Promise<string> {
   const top = unique.slice(0, maxResults);
 
   if (top.length === 0) {
+    const folderResults: FolderMatch[] = [];
+    for (const dir of searchDirs) {
+      walkFoldersByName(dir, queryTokens, 0, folderResults, true);
+    }
+
+    if (folderResults.length === 0) {
+      for (const dir of searchDirs) {
+        walkFoldersByName(dir, queryTokens, 0, folderResults, false);
+      }
+    }
+
+    folderResults.sort((a, b) => b.score - a.score || a.name.length - b.name.length);
+    const folderSeen = new Set<string>();
+    const topFolders = folderResults.filter((r) => {
+      if (folderSeen.has(r.path)) return false;
+      folderSeen.add(r.path);
+      return true;
+    }).slice(0, maxResults);
+
     const hint    = folderHint ? ` inside folder "${folderHint}"` : '';
     const extNote = rawExts    ? ` (${rawExts.join(', ')})` : '';
-    return `No files found matching "${query || '*'}"${hint}${extNote}.`;
+    if (topFolders.length === 0) {
+      return `No files found matching "${query || '*'}"${hint}${extNote}.`;
+    }
+
+    const folderLines = topFolders.map((r, i) => `  ${i + 1}. ${r.name}\n     Full path: ${r.path}`);
+    return `No files found matching "${query || '*'}"${hint}${extNote}.\nFound ${topFolders.length} folder match(es) for "${query || '*'}":\n${folderLines.join('\n')}`;
   }
 
   const lines = top.map((r, i) => `  ${i + 1}. ${r.name}\n     Full path: ${r.path}`);

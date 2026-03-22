@@ -31,6 +31,10 @@ const externalList = [
   '@nut-tree-fork/nut-js',
   '@nut-tree-fork/shared',
   '@nut-tree-fork/provider-interfaces',
+  // Keep Playwright and its dynamic BiDi internals external for Node runtime resolution.
+  'playwright',
+  'playwright-core',
+  'chromium-bidi',
 ];
 
 const aliases = {

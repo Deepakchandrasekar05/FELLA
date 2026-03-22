@@ -1,12 +1,13 @@
 // engine.ts — Stateful conversation engine bridging the CLI and Ollama
 
-import { join, basename, dirname, extname } from 'node:path';
+import { join, basename, dirname, extname, isAbsolute } from 'node:path';
 import { rename, mkdir, rm, rmdir, access } from 'node:fs/promises';
 import { readdirSync, statSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import { AgentLoop, AgentLoopHalt, type AgentStep } from '../agent/loop.js';
 import type { OllamaMessage } from '../llm/schema.js';
+import { LLMClient } from '../llm/client.js';
 import { resolvePath } from '../security/pathGuard.js';
 import { extractSettingRequest, getBatteryStatus } from '../tools/openSettings.js';
 import { executeTool, resolveToolName } from '../tools/registry.js';
@@ -32,12 +33,17 @@ interface PendingConfirmation {
 }
 
 interface PendingSelection {
-  kind: 'navigate-folder' | 'delete-folder' | 'open-file';
+  kind: 'navigate-folder' | 'delete-folder' | 'open-file' | 'list-folder';
   options: string[];
 }
 
 interface PendingOpenClarification {
   target: string;
+}
+
+interface ListedEntry {
+  path: string;
+  isDirectory: boolean;
 }
 
 const CONFIRM_WORDS = new Set(['yes', 'y', 'confirm', 'do it', 'proceed', 'ok', 'okay', 'sure']);
@@ -185,7 +191,7 @@ function findFoldersByName(folderName: string): string[] {
 
 function buildFolderChoicePrompt(folderName: string, options: string[]): string {
   const lines = options.map((option, index) => `${index + 1}. ${option}`);
-  return `I found multiple folders named "${folderName}". Which one should I open?\n${lines.join('\n')}`;
+  return `I found multiple folder matches for "${folderName}":\n${lines.join('\n')}\nType 1 to open the first folder, 2 for the second, and so on.`;
 }
 
 function parseFindFilePaths(resultText: string): string[] {
@@ -199,7 +205,45 @@ function parseFindFilePaths(resultText: string): string[] {
 
 function buildFileChoicePrompt(target: string, options: string[]): string {
   const lines = options.map((option, index) => `${index + 1}. ${option}`);
-  return `I found multiple file matches for "${target}". Which one should I open?\n${lines.join('\n')}`;
+  return `I found multiple file matches for "${target}":\n${lines.join('\n')}\nType 1 to open the first file, 2 for the second, and so on.`;
+}
+
+function extractFolderIntent(text: string): { mode: 'find' | 'open'; folderName: string } | null {
+  const trimmed = text.trim();
+
+  const findMatch = trimmed.match(
+    /^(?:find|search(?:\s+for)?|look\s+for|locate)\s+(?:the\s+)?(.+?)\s+folder(?:\s+.*)?$/i,
+  );
+  if (findMatch?.[1]) {
+    return { mode: 'find', folderName: findMatch[1]!.trim() };
+  }
+
+  const openMatch = trimmed.match(
+    /^(?:open|show(?:\s+me)?|navigate\s+to|go\s+to)\s+(?:the\s+)?(.+?)\s+folder(?:\s+.*)?$/i,
+  );
+  if (openMatch?.[1]) {
+    return { mode: 'open', folderName: openMatch[1]!.trim() };
+  }
+
+  return null;
+}
+
+function resolveSelectionByName(input: string, options: string[]): string | null {
+  const normalizedInput = input
+    .toLowerCase()
+    .replace(/^(?:the\s+)?(?:one\s+)?(?:named|called)?\s*/i, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+
+  if (!normalizedInput) return null;
+
+  const candidates = options.filter((opt) => {
+    const base = basename(opt).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    return base === normalizedInput || base.includes(normalizedInput);
+  });
+
+  if (candidates.length === 1) return candidates[0]!;
+  return null;
 }
 
 function looksLikeAppTarget(target: string): boolean {
@@ -233,8 +277,161 @@ function normaliseWebsiteTarget(target: string): string {
   if (!trimmed) return trimmed;
   if (/^https?:\/\//i.test(trimmed)) return trimmed;
   if (/\.[a-z]{2,}(?:[/:?#]|$)/i.test(trimmed)) return trimmed;
+
+  const lower = trimmed.toLowerCase();
+  const knownSites: Record<string, string> = {
+    'google drive': 'drive.google.com',
+    'google docs': 'docs.google.com',
+    'google doc': 'docs.google.com',
+    gmail: 'mail.google.com',
+    youtube: 'youtube.com',
+    leetcode: 'leetcode.com',
+  };
+  if (knownSites[lower]) return knownSites[lower]!;
+
   if (/^[a-z0-9-]+$/i.test(trimmed)) return `${trimmed}.com`;
   return trimmed;
+}
+
+function normaliseSearchTarget(target: string): string {
+  const trimmed = target.trim();
+  if (!trimmed) return trimmed;
+
+  const withoutArticle = trimmed.replace(/^(?:the|a|an)\s+/i, '');
+  const withoutLocationFiller = withoutArticle
+    .replace(/\b(?:that'?s|which\s+is)\s+somewhere\s+in\s+the\s+system\b/gi, ' ')
+    .replace(/\bsomewhere\s+in\s+the\s+system\b/gi, ' ')
+    .replace(/\bin\s+the\s+system\b/gi, ' ');
+  const withoutGenericNouns = withoutLocationFiller
+    .replace(/\b(?:movie|film|video|installer|setup|app|application|program|file|folder|directory)\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const cleaned = withoutGenericNouns || withoutLocationFiller || withoutArticle || trimmed;
+  return cleaned.replace(/\s+/g, ' ').trim();
+}
+
+function extractExplicitPathFromText(input: string): string | null {
+  const trimmed = input.trim();
+  if (!trimmed) return null;
+
+  const windowsPath = trimmed.match(/[a-zA-Z]:\\[^"<>|?*]+/);
+  if (windowsPath?.[0]) return windowsPath[0].trim();
+
+  if (trimmed.startsWith('/')) return trimmed;
+
+  return null;
+}
+
+function extractContentsIntent(text: string): { target: 'it' | 'path' | 'folderName'; value: string } | null {
+  const trimmed = text.trim();
+
+  if (/^(?:what\s+are\s+)?(?:the\s+)?(?:contents|files)(?:\s+(?:in|of)\s+it|\s+inside\s+it|\s+(?:in|of)\s+this|\s+inside\s+this|\s+here)\??$/i.test(trimmed)) {
+    return { target: 'it', value: 'it' };
+  }
+
+  const pathMatch = trimmed.match(/(?:contents|files).*(?:in|of|inside)\s+([a-zA-Z]:\\[^"<>|?*]+|\/[^\s]+)$/i);
+  if (pathMatch?.[1]) {
+    return { target: 'path', value: pathMatch[1]!.trim() };
+  }
+
+  const folderMatch = trimmed.match(/(?:contents|files)\s+(?:in|of|inside)\s+(?:the\s+)?(.+?)\s+folder\??$/i);
+  if (folderMatch?.[1]) {
+    return { target: 'folderName', value: folderMatch[1]!.trim() };
+  }
+
+  return null;
+}
+
+function inferExtensionsFromQuery(target: string): string[] | null {
+  const t = target.toLowerCase();
+  if (/\bpdf\b/.test(t)) return ['.pdf'];
+  if (/\b(doc|docx|word)\b/.test(t)) return ['.doc', '.docx'];
+  if (/\b(xls|xlsx|excel|spreadsheet)\b/.test(t)) return ['.xls', '.xlsx', '.csv'];
+  if (/\b(ppt|pptx|powerpoint|slides)\b/.test(t)) return ['.ppt', '.pptx'];
+  if (/\b(image|photo|jpg|jpeg|png|webp|gif)\b/.test(t)) return ['.jpg', '.jpeg', '.png', '.webp', '.gif'];
+  if (/\b(video|movie|mp4|mkv|avi|mov|wmv)\b/.test(t)) return ['.mp4', '.mkv', '.avi', '.mov', '.wmv'];
+  return null;
+}
+
+function extractFollowUpAppForLastFile(input: string): string | null {
+  const trimmed = input.trim();
+
+  const patterns = [
+    /^(?:open|play)\s+(?:it|this|that|the\s+file|the\s+movie|the\s+video)\s+(?:with|using|in)\s+(.+)$/i,
+    /^open\s+in\s+it\s+using\s+(.+)$/i,
+    /^(?:use|try)\s+(.+)\s+(?:for|to\s+open)\s+(?:it|this|that)$/i,
+  ];
+
+  for (const pattern of patterns) {
+    const m = trimmed.match(pattern);
+    const raw = m?.[1]?.trim();
+    if (!raw) continue;
+    const cleaned = raw
+      .replace(/\b(media|player|app|application|software)\b/gi, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    return cleaned || raw;
+  }
+
+  return null;
+}
+
+function isLikelyFilePath(path: string): boolean {
+  try {
+    return statSync(path).isFile();
+  } catch {
+    return extname(path).length > 0;
+  }
+}
+
+function parseListFilesEntries(resultText: string): { basePath: string; entries: ListedEntry[] } | null {
+  const headerMatch = resultText.match(/^Contents of (.+):$/m);
+  const basePath = headerMatch?.[1]?.trim();
+  if (!basePath) return null;
+
+  const entries: ListedEntry[] = [];
+  const lineMatches = resultText.matchAll(/^\[(FILE|DIR)\]\s+(.+)$/gm);
+  for (const m of lineMatches) {
+    const kind = m[1] ?? '';
+    const name = (m[2] ?? '').trim();
+    if (!name) continue;
+    entries.push({
+      path: join(basePath, name),
+      isDirectory: kind === 'DIR',
+    });
+  }
+
+  return { basePath, entries };
+}
+
+function resolveOrdinal(raw: string): number | null {
+  const token = raw.trim().toLowerCase();
+  if (/^\d+$/.test(token)) {
+    const n = Number.parseInt(token, 10);
+    return Number.isInteger(n) && n > 0 ? n : null;
+  }
+
+  const map: Record<string, number> = {
+    first: 1,
+    second: 2,
+    third: 3,
+    fourth: 4,
+    fifth: 5,
+    sixth: 6,
+    seventh: 7,
+    eighth: 8,
+    ninth: 9,
+    tenth: 10,
+  };
+  return map[token] ?? null;
+}
+
+function normaliseAppName(raw: string): string {
+  return raw
+    .replace(/\b(media|player|app|application|software)\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function toKebabCase(input: string): string {
@@ -247,16 +444,48 @@ function toKebabCase(input: string): string {
 }
 
 function extractLeetCodeProblemName(text: string): string | null {
+  const sanitized = text
+    .replace(/\s+in\s+(?:chrome|chromium|edge|firefox|safari|browser)\s*$/i, '')
+    .trim();
+  const hasLeadingProblemNumber = /\b\d+\./.test(sanitized);
+
+  const numberedDirect = sanitized.match(
+    /^\s*\d+\.\s*([a-z0-9][a-z0-9\s'\-]*?)(?=\s+(?:open|show|find|go\s+to|navigate\s+to|in\s+leetcode|on\s+leetcode|leetcode|in\s+chrome|in\s+browser|new\s+tab)\b|$)/i,
+  );
+  if (numberedDirect?.[1]) {
+    return numberedDirect[1].trim();
+  }
+
   const patterns = [
+    /(?:open|show|find|go\s+to|navigate\s+to)\s+(.+?)\s+problem'?s?\s+solutions?(?:\s+page)?(?:\s+in\s+leetcode(?:\.com)?)?/i,
+    /(?:open|solve|show|find)\s+\d+\.\s*([^.,]+?)(?:\s+in\s+leetcode(?:\.com)?|$)/i,
+    /^\d+\.\s*([^.,]+?)(?:\s+in\s+leetcode(?:\.com)?|$)/i,
+    /(?:open|solve|show|find)\s+(?:the\s+)?(.+?)\s+problem\s+(?:in|on)\s+leetcode(?:\.com)?/i,
     /(?:named|called)\s+(.+?)(?:\s+in\s+leetcode(?:\.com)?|\s+on\s+leetcode(?:\.com)?|$)/i,
     /\bin\s+\d+\.\s*([^.,]+?)\s+in\s+leetcode(?:\.com)?/i,
     /problem\s+(.+?)(?:\s+in\s+leetcode(?:\.com)?|\s+on\s+leetcode(?:\.com)?|$)/i,
   ];
 
   for (const pattern of patterns) {
-    const match = text.match(pattern);
+    const match = sanitized.match(pattern);
     const candidate = match?.[1]?.trim();
-    if (candidate) return candidate;
+    if (!candidate) continue;
+    let cleaned = candidate
+      .replace(/^the\s+/i, '')
+      .replace(/\s+this\s+sum$/i, '')
+      .replace(/\s+(?:sum|page)$/i, '')
+      .replace(/\s+open\b.*$/i, '')
+      .replace(/\s+(?:in|on)\s+leetcode(?:\.com)?$/i, '')
+      .replace(/\s+(?:in\s+chrome|in\s+browser|new\s+tab)\b.*$/i, '')
+      .trim();
+    if (
+      hasLeadingProblemNumber
+      && /\s+sum$/i.test(cleaned)
+      && !/\b(?:two|three|four)\s+sum$/i.test(cleaned)
+    ) {
+      cleaned = cleaned.replace(/\s+sum$/i, '').trim();
+    }
+    if (cleaned && !/^in\s+leetcode(?:\.com)?$/i.test(cleaned)) return cleaned;
   }
 
   return null;
@@ -287,6 +516,71 @@ function buildLeetCodeUrlFromPrompt(text: string): string | null {
   return wantsJava
     ? `${base}solutions/?language=java`
     : `${base}solutions/`;
+}
+
+function extractLeetCodeSlugFromUrl(url: string): string | null {
+  const m = url.match(/leetcode\.com\/problems\/([a-z0-9-]+)\//i);
+  return m?.[1] ?? null;
+}
+
+function extractDocsWriteRequest(text: string): { explicitText: string | null; topic: string | null } | null {
+  const raw = text.trim();
+  const hasDocsAnchor = /\b(?:google\s+docs?|docs\.new|document|doc)\b/i.test(raw)
+    || /\buntitled\s+document\b/i.test(raw)
+    || /\b(?:in|inside)\s+(?:it|this|that|here)\b/i.test(raw);
+  if (!hasDocsAnchor) {
+    return null;
+  }
+  if (!/\b(write|type|draft|compose|add|insert)\b/i.test(raw)) {
+    return null;
+  }
+
+  const quoted = raw.match(/["']([^"']{1,4000})["']/);
+  if (quoted?.[1]) {
+    return { explicitText: quoted[1].trim(), topic: null };
+  }
+
+  const topicPatterns = [
+    /\b(?:about|on)\s+(.+?)(?:\s+in\s+(?:that|this)\s+document|\s+in\s+(?:the\s+)?(?:untitled\s+)?(?:google\s+)?doc(?:ument)?(?:s)?(?:\s+in\s+chrome)?|\s+in\s+(?:it|this|that|here)|$)/i,
+    /\bwrite\s+(?:some\s+)?(?:content|paragraph|note|notes|essay)?\s*(?:for\s+)?(.+?)(?:\s+in\s+(?:that|this)\s+document|\s+in\s+(?:the\s+)?(?:untitled\s+)?(?:google\s+)?doc(?:ument)?(?:s)?(?:\s+in\s+chrome)?|\s+in\s+(?:it|this|that|here)|$)/i,
+  ];
+
+  for (const rx of topicPatterns) {
+    const m = raw.match(rx);
+    const topic = m?.[1]
+      ?.trim()
+      .replace(/\s+in\s+(?:that|this)\s+document$/i, '')
+      .trim();
+    if (topic) {
+      return { explicitText: null, topic };
+    }
+  }
+
+  return { explicitText: null, topic: 'Fella and AI productivity' };
+}
+
+function extractDocsRenameRequest(text: string): string | null {
+  const m = text.trim().match(/^(?:rename|set|change)\s+(?:the\s+)?document(?:\s+(?:name|title))?\s+(?:to|as)\s+(.+)$/i);
+  return m?.[1]?.trim() ?? null;
+}
+
+function extractDocsFontRequest(text: string): string | null {
+  const m = text.trim().match(/(?:change|set)\s+(?:the\s+)?font\s+(?:to|as)\s+(.+)$/i);
+  return m?.[1]?.trim() ?? null;
+}
+
+function extractDocsFontSizeRequest(text: string): string | null {
+  const trimmed = text.trim();
+  const explicit = trimmed.match(/(?:increase|decrease|change|set)\s+(?:the\s+)?(?:text\s+)?(?:font\s+)?size\s+(?:to|as)?\s*([0-9]+(?:\.[0-9]+)?(?:\s*pt)?)$/i);
+  if (explicit?.[1]) return explicit[1].trim();
+
+  const shortForm = trimmed.match(/^(?:font\s+size|text\s+size)\s*[:=]?\s*([0-9]+(?:\.[0-9]+)?(?:\s*pt)?)$/i);
+  return shortForm?.[1]?.trim() ?? null;
+}
+
+function extractDocsColorRequest(text: string): string | null {
+  const m = text.trim().match(/(?:change|set)\s+(?:the\s+)?(?:text\s+)?colou?r\s+(?:to|as)\s+(.+)$/i);
+  return m?.[1]?.trim() ?? null;
 }
 
 function generateSessionId(): string {
@@ -330,6 +624,75 @@ export class Engine {
 
   /** Pending user clarification for ambiguous open intent target. */
   private pendingOpenClarification: PendingOpenClarification | null = null;
+
+  /** Last file opened successfully, used for follow-ups like "open it with VLC". */
+  private lastOpenedFilePath: string | null = null;
+
+  /** Last folder navigated/opened successfully, used for follow-ups like "organize ... in it". */
+  private lastNavigatedFolderPath: string | null = null;
+
+  /** Current working directory for CLI-style follow-ups (`cd`, `open first one`, `in it`). */
+  private currentDirectory: string | null = null;
+
+  /** Most recent directory listing entries, used by ordinal follow-ups. */
+  private lastListedEntries: ListedEntry[] = [];
+
+  /** Tracks whether the current active context is Chrome/Edge browser automation. */
+  private browserContextActive = false;
+
+  /** Last opened LeetCode problem slug for browser-context follow-ups like "open solutions page of it". */
+  private lastLeetCodeSlug: string | null = null;
+
+  private readonly llmClient = new LLMClient();
+
+  private async executeBrowserTool(args: Record<string, unknown>): Promise<string> {
+    const result = await executeTool('browserAutomation', args);
+    const action = String(args['action'] ?? '').toLowerCase();
+    this.browserContextActive = action !== 'close';
+    if (action === 'navigate') {
+      const rawUrl = String(args['url'] ?? '');
+      const slug = extractLeetCodeSlugFromUrl(rawUrl);
+      if (slug) this.lastLeetCodeSlug = slug;
+    }
+    return result;
+  }
+
+  private async generateDocsDraft(topic: string): Promise<string> {
+    const prompt = `Write a short polished paragraph (5-7 sentences) for a Google Doc about: ${topic}. Return plain text only.`;
+    const out = await this.llmClient.chat([{ role: 'user', content: prompt }]);
+    const generated = typeof out.response === 'string' ? out.response.trim() : '';
+    if (generated) return generated;
+    return `${topic} focuses on designing software as collaborating objects with clear responsibilities, reusable abstractions, and maintainable interfaces. It emphasizes encapsulation, inheritance, and polymorphism to model complex domains in a structured way. In practice, teams apply object-oriented principles to improve readability, reduce coupling, and support long-term evolution of the codebase. Good object-oriented software engineering also values testing, code reviews, and iterative refactoring so designs stay aligned with changing requirements.`;
+  }
+
+  private rememberNavigatedFolder(pathOrAlias: string): void {
+    try {
+      const resolved = resolvePath(pathOrAlias);
+      if (existsSync(resolved) && statSync(resolved).isDirectory()) {
+        this.lastNavigatedFolderPath = resolved;
+        this.currentDirectory = resolved;
+        this.browserContextActive = false;
+      }
+    } catch {
+      // Ignore invalid or inaccessible paths.
+    }
+  }
+
+  private rememberListedEntries(listResult: string): void {
+    const parsed = parseListFilesEntries(listResult);
+    if (!parsed) return;
+    this.lastListedEntries = parsed.entries;
+    this.currentDirectory = parsed.basePath;
+    this.lastNavigatedFolderPath = parsed.basePath;
+  }
+
+  private resolveWithinCurrentDirectory(raw: string): string {
+    const trimmed = raw.trim();
+    if (!trimmed) throw new Error('Path cannot be empty.');
+    if (isAbsolute(trimmed) || /^[a-z]:[\\/]/i.test(trimmed)) return resolvePath(trimmed);
+    if (this.currentDirectory) return resolvePath(join(this.currentDirectory, trimmed));
+    return resolvePath(trimmed);
+  }
 
   /** Undo / Redo stack — tracks reversible file operations. */
   private undoStack = new UndoStack();
@@ -377,6 +740,13 @@ export class Engine {
   /** Unique identifier for this session. */
   get id(): string {
     return this._sessionId;
+  }
+
+  getAssistantLabel(): string {
+    if (this.browserContextActive) return 'fella (inside Chrome)';
+    return this.currentDirectory
+      ? `fella (inside ${this.currentDirectory})`
+      : 'fella';
   }
 
   /** Returns visible turns from this session for UI reconstruction on resume. */
@@ -485,12 +855,40 @@ export class Engine {
       const { moved, skipped, errors, actualMoves } = executePlan(plan);
 
       if (actualMoves.length > 0) {
+        const cleanupRoots = [...new Set(actualMoves.map((m) => dirname(m.destination)))];
+
+        const removeEmptyParents = async (startDir: string, stopDir: string): Promise<void> => {
+          let current = startDir;
+          const stopResolved = resolvePath(stopDir);
+
+          while (true) {
+            const currentResolved = resolvePath(current);
+            if (currentResolved === stopResolved) break;
+
+            try {
+              await rmdir(currentResolved);
+            } catch {
+              break;
+            }
+
+            const parent = dirname(currentResolved);
+            if (parent === currentResolved) break;
+            current = parent;
+          }
+        };
+
         this.undoStack.push({
           description: `organise ${actualMoves.length} file${actualMoves.length !== 1 ? 's' : ''} in ${basename(sourceDir)}`,
           undo: async () => {
             for (const { source, destination } of [...actualMoves].reverse()) {
               await mkdir(dirname(source), { recursive: true });
               await rename(destination, source);
+            }
+
+            // Clean up empty destination folders created by organisation (e.g. Images/Videos).
+            const deepestFirst = cleanupRoots.sort((a, b) => b.length - a.length);
+            for (const dir of deepestFirst) {
+              await removeEmptyParents(dir, sourceDir);
             }
           },
           redo: async () => {
@@ -561,6 +959,15 @@ export class Engine {
 
     const result = await this.executeWithHistory(tool, args);
 
+    if (resolvedTool === 'browserAutomation') {
+      const action = String(args['action'] ?? '').toLowerCase();
+      this.browserContextActive = action !== 'close';
+    }
+
+    if (resolvedTool === 'listFiles') {
+      this.rememberListedEntries(result);
+    }
+
     // organiseByRule with dry_run queues the execute step for explicit confirmation.
     if (resolvedTool === 'organiseByRule' && args['dry_run'] !== false) {
       this.pendingConfirmation = {
@@ -616,6 +1023,18 @@ export class Engine {
       return reply;
     }
 
+    if (/^(profile\s+selected|selected\s+profile|profile\s+chosen)[.!]?$/i.test(trimmed)) {
+      this.history.push({ role: 'user', content: userMessage });
+      let reply: string;
+      try {
+        reply = await this.executeBrowserTool({ action: 'profile_selected' });
+      } catch (err) {
+        reply = `Browser setup error: ${err instanceof Error ? err.message : String(err)}`;
+      }
+      this.history.push({ role: 'assistant', content: reply });
+      return reply;
+    }
+
     if (!this.pendingConfirmation && !this.pendingSelection && !this.pendingOpenClarification && ACKNOWLEDGEMENT_WORDS.has(trimmed)) {
       const reply = trimmed === 'thanks' || trimmed === 'thank you' ? 'You can tell me the next thing to do.' : 'Okay.';
       this.history.push({ role: 'user', content: userMessage });
@@ -623,41 +1042,411 @@ export class Engine {
       return reply;
     }
 
+    if (/^(?:cd\s*~?|home|go\s+home|come\s+out(?:\s+of\s+the\s+directory)?|come\s+to\s+home\s+dir(?:ectory)?)$/i.test(trimmed)) {
+      this.history.push({ role: 'user', content: userMessage });
+      const homeDir = resolvePath('home');
+      this.currentDirectory = homeDir;
+      this.lastNavigatedFolderPath = homeDir;
+      this.browserContextActive = false;
+      const reply = `Changed directory to ${homeDir}`;
+      this.history.push({ role: 'assistant', content: reply });
+      return reply;
+    }
+
+    if (/^(?:close|exit)\s+(?:chrome|browser)$/i.test(trimmed)) {
+      this.history.push({ role: 'user', content: userMessage });
+      let reply: string;
+      try {
+        reply = await this.executeBrowserTool({ action: 'close' });
+      } catch (err) {
+        reply = `Close browser error: ${err instanceof Error ? err.message : String(err)}`;
+      }
+      this.history.push({ role: 'assistant', content: reply });
+      return reply;
+    }
+
+    if (/^(?:close|exit)\s+(?:tab|this\s+tab|current\s+tab)$/i.test(trimmed)) {
+      this.history.push({ role: 'user', content: userMessage });
+      let reply: string;
+      try {
+        reply = await this.executeBrowserTool({ action: 'close_tab' });
+      } catch (err) {
+        reply = `Close tab error: ${err instanceof Error ? err.message : String(err)}`;
+      }
+      this.history.push({ role: 'assistant', content: reply });
+      return reply;
+    }
+
+    if (/^(?:close|exit)\s+(?:all\s+)?(?:the\s+)?tabs?(?:\s+in\s+(?:chrome|browser))?$/i.test(trimmed)) {
+      this.history.push({ role: 'user', content: userMessage });
+      let reply: string;
+      try {
+        reply = await this.executeBrowserTool({ action: 'close_all_tabs' });
+      } catch (err) {
+        reply = `Close tabs error: ${err instanceof Error ? err.message : String(err)}`;
+      }
+      this.history.push({ role: 'assistant', content: reply });
+      return reply;
+    }
+
+    if (/^(?:close|exit)\s+(?:folder|this\s+folder|current\s+folder)$/i.test(trimmed)) {
+      this.history.push({ role: 'user', content: userMessage });
+      this.browserContextActive = false;
+      let reply: string;
+      try {
+        const targetPath = this.currentDirectory ?? this.lastNavigatedFolderPath ?? '';
+        reply = await executeTool('screenAutomation', {
+          action: 'close_folder',
+          ...(targetPath ? { path: targetPath } : {}),
+        });
+        if (/^Closed folder window/i.test(reply) || /^Closed \d+ Explorer window/i.test(reply)) {
+          this.currentDirectory = null;
+          this.lastNavigatedFolderPath = null;
+          this.lastListedEntries = [];
+        }
+      } catch (err) {
+        reply = `Close folder error: ${err instanceof Error ? err.message : String(err)}`;
+      }
+      this.history.push({ role: 'assistant', content: reply });
+      return reply;
+    }
+
+    if (/^(?:close|exit)\s+(?:file|window|application|app|this\s+window|current\s+window)$/i.test(trimmed)) {
+      this.history.push({ role: 'user', content: userMessage });
+      this.browserContextActive = false;
+      let reply: string;
+      try {
+        reply = await executeTool('screenAutomation', {
+          action: 'hotkey',
+          keys: ['alt', 'f4'],
+        });
+      } catch (err) {
+        reply = `Close window error: ${err instanceof Error ? err.message : String(err)}`;
+      }
+      this.history.push({ role: 'assistant', content: reply });
+      return reply;
+    }
+
+    const cdMatch = userMessage.trim().match(/^cd\s+(.+)$/i);
+    if (cdMatch) {
+      this.history.push({ role: 'user', content: userMessage });
+      const target = cdMatch[1]!.trim();
+      let reply: string;
+      try {
+        const resolved = this.resolveWithinCurrentDirectory(target);
+        if (!existsSync(resolved) || !statSync(resolved).isDirectory()) {
+          reply = `Directory not found: ${resolved}`;
+        } else {
+          this.currentDirectory = resolved;
+          this.lastNavigatedFolderPath = resolved;
+          this.browserContextActive = false;
+          reply = `Changed directory to ${resolved}`;
+        }
+      } catch (err) {
+        reply = `cd error: ${err instanceof Error ? err.message : String(err)}`;
+      }
+      this.history.push({ role: 'assistant', content: reply });
+      return reply;
+    }
+
+    const openLeetCodeSolutionsFollowUpEarly = userMessage.trim().match(
+      /^(?:open|show|go\s+to|navigate\s+to)\s+(?:the\s+)?solutions?(?:\s+page)?(?:\s+(?:of|in)\s+(?:it|this|that))?(?:\s+in\s+leetcode(?:\.com)?)?(?:\s+in\s+(?:chrome|browser))?$/i,
+    );
+    if (openLeetCodeSolutionsFollowUpEarly && this.browserContextActive) {
+      this.history.push({ role: 'user', content: userMessage });
+      if (!this.lastLeetCodeSlug) {
+        const reply = 'I do not have a recent LeetCode problem in browser context yet. Open a LeetCode problem first, then I can open its solutions page.';
+        this.history.push({ role: 'assistant', content: reply });
+        return reply;
+      }
+
+      const wantsNewTab = /\bnew\s+tab\b/i.test(userMessage);
+      const url = `https://leetcode.com/problems/${this.lastLeetCodeSlug}/solutions/`;
+      let reply: string;
+      try {
+        reply = await this.executeBrowserTool({ action: 'navigate', url, newTab: wantsNewTab });
+      } catch (err) {
+        reply = `Open LeetCode solutions error: ${err instanceof Error ? err.message : String(err)}`;
+      }
+      this.history.push({ role: 'assistant', content: reply });
+      return reply;
+    }
+
+    const openInCurrentMatch = userMessage.trim().match(/^open\s+(.+?)\s+in\s+(?:it|this|that|here)\.?$/i);
+    if (openInCurrentMatch) {
+      this.history.push({ role: 'user', content: userMessage });
+      if (!this.currentDirectory) {
+        const reply = 'I do not have a current folder context yet. Open or navigate to a folder first.';
+        this.history.push({ role: 'assistant', content: reply });
+        return reply;
+      }
+
+      const itemName = openInCurrentMatch[1]!.trim();
+      let reply: string;
+      try {
+        const targetPath = resolvePath(join(this.currentDirectory, itemName));
+        if (!existsSync(targetPath)) {
+          reply = `I couldn't find "${itemName}" inside ${this.currentDirectory}.`;
+        } else {
+          reply = await executeTool('screenAutomation', { action: 'navigate', path: targetPath });
+          if (statSync(targetPath).isDirectory()) this.rememberNavigatedFolder(targetPath);
+          else this.lastOpenedFilePath = targetPath;
+        }
+      } catch (err) {
+        reply = `Open item error: ${err instanceof Error ? err.message : String(err)}`;
+      }
+
+      this.history.push({ role: 'assistant', content: reply });
+      return reply;
+    }
+
+    const openOrdinalWithAppMatch = userMessage.trim().match(
+      /^open\s+(?:the\s+)?(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|\d+)(?:\s+(?:listed|shown|mentioned))?(?:\s+(?:one|item|file|folder))?\s+(?:in|with|using)\s+(.+)$/i,
+    );
+    if (openOrdinalWithAppMatch) {
+      this.history.push({ role: 'user', content: userMessage });
+
+      const ord = resolveOrdinal(openOrdinalWithAppMatch[1] ?? '');
+      const rawApp = openOrdinalWithAppMatch[2] ?? '';
+      const app = normaliseAppName(rawApp) || rawApp.trim();
+
+      if (!ord || this.lastListedEntries.length === 0) {
+        const reply = 'I do not have a recent indexed list in context. Ask for folder contents or recent downloads first, then I can open by number.';
+        this.history.push({ role: 'assistant', content: reply });
+        return reply;
+      }
+
+      const entry = this.lastListedEntries[ord - 1];
+      if (!entry) {
+        const reply = `Please choose a number between 1 and ${this.lastListedEntries.length}.`;
+        this.history.push({ role: 'assistant', content: reply });
+        return reply;
+      }
+
+      let reply: string;
+      try {
+        reply = await executeTool('openApplication', {
+          app,
+          file_path: entry.path,
+        });
+        if (entry.isDirectory) this.rememberNavigatedFolder(entry.path);
+        else this.lastOpenedFilePath = entry.path;
+      } catch (err) {
+        reply = `Open item error: ${err instanceof Error ? err.message : String(err)}`;
+      }
+
+      this.history.push({ role: 'assistant', content: reply });
+      return reply;
+    }
+
+    const openOrdinalMatch = userMessage.trim().match(
+      /^open\s+(?:the\s+)?(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|\d+)(?:\s+(?:listed|shown|mentioned))?(?:\s+(?:one|item|file|folder))?$/i,
+    );
+    if (openOrdinalMatch) {
+      this.history.push({ role: 'user', content: userMessage });
+      const ord = resolveOrdinal(openOrdinalMatch[1] ?? '');
+      if (!ord) {
+        const reply = 'I do not have a recent indexed list in context. Ask for folder contents first, then I can open by number.';
+        this.history.push({ role: 'assistant', content: reply });
+        return reply;
+      }
+
+      if (this.lastListedEntries.length === 0 && this.currentDirectory) {
+        try {
+          const listResult = await executeTool('listFiles', { path: this.currentDirectory });
+          this.rememberListedEntries(listResult);
+        } catch {
+          // keep existing error path below
+        }
+      }
+
+      if (this.lastListedEntries.length === 0) {
+        const reply = 'I do not have a recent indexed list in context. Ask for folder contents first, then I can open by number.';
+        this.history.push({ role: 'assistant', content: reply });
+        return reply;
+      }
+
+      const entry = this.lastListedEntries[ord - 1];
+      if (!entry) {
+        const reply = `Please choose a number between 1 and ${this.lastListedEntries.length}.`;
+        this.history.push({ role: 'assistant', content: reply });
+        return reply;
+      }
+
+      let reply: string;
+      try {
+        reply = await executeTool('screenAutomation', { action: 'navigate', path: entry.path });
+        if (entry.isDirectory) {
+          this.rememberNavigatedFolder(entry.path);
+        } else {
+          this.lastOpenedFilePath = entry.path;
+        }
+      } catch (err) {
+        reply = `Open item error: ${err instanceof Error ? err.message : String(err)}`;
+      }
+      this.history.push({ role: 'assistant', content: reply });
+      return reply;
+    }
+
+    const contentsIntent = extractContentsIntent(userMessage);
+    if (contentsIntent) {
+      this.history.push({ role: 'user', content: userMessage });
+
+      if (contentsIntent.target === 'it') {
+        if (!this.lastNavigatedFolderPath) {
+          const reply = 'I do not have a recent opened folder in context yet. Tell me the folder name or path, and I will list its contents.';
+          this.history.push({ role: 'assistant', content: reply });
+          return reply;
+        }
+        let reply: string;
+        try {
+          reply = await executeTool('listFiles', { path: this.lastNavigatedFolderPath });
+          this.rememberListedEntries(reply);
+        } catch (err) {
+          reply = `List contents error: ${err instanceof Error ? err.message : String(err)}`;
+        }
+        this.history.push({ role: 'assistant', content: reply });
+        return reply;
+      }
+
+      if (contentsIntent.target === 'path') {
+        let reply: string;
+        try {
+          const targetPath = this.resolveWithinCurrentDirectory(contentsIntent.value);
+          reply = await executeTool('listFiles', { path: targetPath });
+          this.rememberListedEntries(reply);
+        } catch (err) {
+          reply = `List contents error: ${err instanceof Error ? err.message : String(err)}`;
+        }
+        this.history.push({ role: 'assistant', content: reply });
+        return reply;
+      }
+
+      const folders = findFoldersByName(contentsIntent.value);
+      if (folders.length === 0) {
+        const reply = `I couldn't find a folder named "${contentsIntent.value}".`;
+        this.history.push({ role: 'assistant', content: reply });
+        return reply;
+      }
+
+      if (folders.length === 1) {
+        let reply: string;
+        try {
+          reply = await executeTool('listFiles', { path: folders[0] });
+          this.rememberListedEntries(reply);
+        } catch (err) {
+          reply = `List contents error: ${err instanceof Error ? err.message : String(err)}`;
+        }
+        this.history.push({ role: 'assistant', content: reply });
+        return reply;
+      }
+
+      this.pendingSelection = { kind: 'list-folder', options: folders };
+      const reply = `I found multiple folders named "${contentsIntent.value}":\n${folders.map((f, i) => `${i + 1}. ${f}`).join('\n')}\nType 1 to choose the first folder, 2 for the second, and so on.`;
+      this.history.push({ role: 'assistant', content: reply });
+      return reply;
+    }
+
+    const followUpApp = extractFollowUpAppForLastFile(userMessage);
+    if (followUpApp) {
+      this.history.push({ role: 'user', content: userMessage });
+      if (!this.lastOpenedFilePath) {
+        const reply = 'I do not have a recent opened file in context yet. Tell me which file to open first, then I can reopen it with a specific app.';
+        this.history.push({ role: 'assistant', content: reply });
+        return reply;
+      }
+
+      let reply: string;
+      try {
+        reply = await executeTool('openApplication', {
+          app: followUpApp,
+          file_path: this.lastOpenedFilePath,
+        });
+      } catch (err) {
+        reply = `Open with app error: ${err instanceof Error ? err.message : String(err)}`;
+      }
+      this.history.push({ role: 'assistant', content: reply });
+      return reply;
+    }
+
+    if (/(?:organi[sz]e|oraginze)\b/i.test(userMessage) && /\bin\s+(?:it|this|that|here)\b/i.test(userMessage)) {
+      this.history.push({ role: 'user', content: userMessage });
+
+      if (!this.lastNavigatedFolderPath) {
+        const reply = 'I do not have a recent opened folder in context yet. Open or navigate to a folder first, then I can organize files in it.';
+        this.history.push({ role: 'assistant', content: reply });
+        return reply;
+      }
+
+      const lower = userMessage.toLowerCase();
+      const mentionsImages = /\bimage|images|photo|photos|picture|pictures\b/.test(lower);
+      const mentionsVideos = /\bvideo|videos|movie|movies\b/.test(lower);
+      const rule = (mentionsImages && mentionsVideos) ? 'by_category' : 'by_type';
+
+      let reply: string;
+      try {
+        reply = await this.executeAgentTool('organiseByRule', {
+          source_dir: this.lastNavigatedFolderPath,
+          rule,
+          dry_run: true,
+        });
+      } catch (err) {
+        reply = `Organize error: ${err instanceof Error ? err.message : String(err)}`;
+      }
+
+      this.history.push({ role: 'assistant', content: reply });
+      return reply;
+    }
+
     if (this.pendingSelection) {
       const selection = Number.parseInt(userMessage.trim(), 10);
-      if (Number.isInteger(selection)) {
-        const chosenPath = this.pendingSelection.options[selection - 1];
-        if (chosenPath) {
-          const kind = this.pendingSelection.kind;
-          this.pendingSelection = null;
-          this.history.push({ role: 'user', content: userMessage });
-          let reply: string;
-          if (kind === 'delete-folder') {
-            this.pendingConfirmation = { tool: 'deleteFile', args: { path: chosenPath } };
-            reply = `Are you sure you want to permanently delete "${chosenPath}" and all its contents? (yes / no)`;
-          } else if (kind === 'open-file') {
-            try {
-              reply = await executeTool('screenAutomation', {
-                action: 'navigate',
-                path: chosenPath,
-              });
-            } catch (err) {
-              reply = `Open file error: ${err instanceof Error ? err.message : String(err)}`;
-            }
-          } else {
-            try {
-              reply = await executeTool('screenAutomation', {
-                action: 'navigate',
-                path: chosenPath,
-              });
-            } catch (err) {
-              reply = `Navigate error: ${err instanceof Error ? err.message : String(err)}`;
-            }
-          }
-          this.history.push({ role: 'assistant', content: reply! });
-          return reply!;
-        }
+      const numberChoice = Number.isInteger(selection)
+        ? this.pendingSelection.options[selection - 1] ?? null
+        : null;
+      const nameChoice = numberChoice ? null : resolveSelectionByName(userMessage, this.pendingSelection.options);
+      const chosenPath = numberChoice ?? nameChoice;
 
+      if (chosenPath) {
+        const kind = this.pendingSelection.kind;
+        this.pendingSelection = null;
+        this.history.push({ role: 'user', content: userMessage });
+        let reply: string;
+        if (kind === 'delete-folder') {
+          this.pendingConfirmation = { tool: 'deleteFile', args: { path: chosenPath } };
+          reply = `Are you sure you want to permanently delete "${chosenPath}" and all its contents? (yes / no)`;
+        } else if (kind === 'list-folder') {
+          try {
+            reply = await executeTool('listFiles', { path: chosenPath });
+            this.rememberListedEntries(reply);
+          } catch (err) {
+            reply = `List contents error: ${err instanceof Error ? err.message : String(err)}`;
+          }
+        } else if (kind === 'open-file') {
+          try {
+            reply = await executeTool('screenAutomation', {
+              action: 'navigate',
+              path: chosenPath,
+            });
+            this.lastOpenedFilePath = chosenPath;
+          } catch (err) {
+            reply = `Open file error: ${err instanceof Error ? err.message : String(err)}`;
+          }
+        } else {
+          try {
+            reply = await executeTool('screenAutomation', {
+              action: 'navigate',
+              path: chosenPath,
+            });
+            this.rememberNavigatedFolder(chosenPath);
+          } catch (err) {
+            reply = `Navigate error: ${err instanceof Error ? err.message : String(err)}`;
+          }
+        }
+        this.history.push({ role: 'assistant', content: reply! });
+        return reply!;
+      }
+
+      if (Number.isInteger(selection)) {
         const reply = `Please choose a number between 1 and ${this.pendingSelection.options.length}.`;
         this.history.push({ role: 'user', content: userMessage });
         this.history.push({ role: 'assistant', content: reply });
@@ -678,14 +1467,136 @@ export class Engine {
     const leetCodeUrl = buildLeetCodeUrlFromPrompt(userMessage);
     if (leetCodeUrl) {
       this.history.push({ role: 'user', content: userMessage });
+      const wantsNewTab = /\bnew\s+tab\b/i.test(userMessage);
       let reply: string;
       try {
-        reply = await executeTool('browserAutomation', {
+        reply = await this.executeBrowserTool({
           action: 'navigate',
           url: leetCodeUrl,
+          newTab: wantsNewTab,
         });
+        const slug = extractLeetCodeSlugFromUrl(leetCodeUrl);
+        if (slug) this.lastLeetCodeSlug = slug;
       } catch (err) {
         reply = `Open LeetCode error: ${err instanceof Error ? err.message : String(err)}`;
+      }
+      this.history.push({ role: 'assistant', content: reply });
+      return reply;
+    }
+
+    // Deterministic Google Docs shortcut: open/create a new untitled doc in browser.
+    if (/\bgoogle\s+docs\b/i.test(userMessage) && /\b(create|new|untitled|open)\b/i.test(userMessage)) {
+      this.history.push({ role: 'user', content: userMessage });
+      const wantsNewTab = /\bnew\s+tab\b/i.test(userMessage);
+      let reply: string;
+      try {
+        reply = await this.executeBrowserTool({
+          action: 'navigate',
+          url: 'https://docs.new',
+          newTab: wantsNewTab,
+        });
+      } catch (err) {
+        reply = `Open Google Docs error: ${err instanceof Error ? err.message : String(err)}`;
+      }
+      this.history.push({ role: 'assistant', content: reply });
+      return reply;
+    }
+
+    const docsWriteRequest = extractDocsWriteRequest(userMessage);
+    const docsWriteByContext = !docsWriteRequest
+      && this.browserContextActive
+      && /\b(write|type|draft|compose|add|insert)\b/i.test(userMessage)
+      && /\b(?:about|on)\s+.+/i.test(userMessage);
+    if (docsWriteRequest || docsWriteByContext) {
+      this.history.push({ role: 'user', content: userMessage });
+      let reply: string;
+      try {
+        const topicFromContext = userMessage.match(/\b(?:about|on)\s+(.+?)(?:\s+in\s+(?:it|this|that|here)|$)/i)?.[1]?.trim() ?? null;
+        const topicLabel = docsWriteRequest?.topic ?? topicFromContext ?? 'Fella and AI productivity';
+        const content = docsWriteRequest?.explicitText
+          ?? await this.generateDocsDraft(topicLabel);
+        await this.executeBrowserTool({ action: 'append_text', text: content });
+        reply = docsWriteRequest?.explicitText
+          ? 'Added your text to the current Google Docs page in Chrome.'
+          : `Generated and added content about "${topicLabel}" to the current Google Docs page in Chrome.`;
+      } catch (err) {
+        reply = `Write in Google Docs error: ${err instanceof Error ? err.message : String(err)}`;
+      }
+      this.history.push({ role: 'assistant', content: reply });
+      return reply;
+    }
+
+    const docsRenameTarget = extractDocsRenameRequest(userMessage);
+    if (docsRenameTarget && this.browserContextActive) {
+      this.history.push({ role: 'user', content: userMessage });
+      let reply: string;
+      try {
+        reply = await this.executeBrowserTool({ action: 'rename_document', title: docsRenameTarget });
+      } catch (err) {
+        reply = `Rename document error: ${err instanceof Error ? err.message : String(err)}`;
+      }
+      this.history.push({ role: 'assistant', content: reply });
+      return reply;
+    }
+
+    const wantsSelectAll = /\bselect\s+all\b/i.test(userMessage);
+    const docsFont = extractDocsFontRequest(userMessage);
+    const docsFontSize = extractDocsFontSizeRequest(userMessage);
+    const docsColor = extractDocsColorRequest(userMessage);
+    const wantsHeaderFooter = /\b(?:add|insert)\s+(?:a\s+)?header\s*\/\s*footer\b|\b(?:add|insert)\s+header(?:\s+and\s+footer)?\b|\b(?:add|insert)\s+footer(?:\s+and\s+header)?\b/i.test(userMessage);
+    if (this.browserContextActive && (wantsSelectAll || !!docsFont || !!docsFontSize || !!docsColor || wantsHeaderFooter)) {
+      this.history.push({ role: 'user', content: userMessage });
+      const done: string[] = [];
+      let reply: string;
+      try {
+        if (wantsSelectAll) {
+          await this.executeBrowserTool({ action: 'select_all' });
+          done.push('selected all content');
+        }
+        if (docsFont) {
+          await this.executeBrowserTool({ action: 'set_font', font: docsFont });
+          done.push(`set font to ${docsFont}`);
+        }
+        if (docsFontSize) {
+          await this.executeBrowserTool({ action: 'set_font_size', size: docsFontSize });
+          done.push(`set font size to ${docsFontSize}`);
+        }
+        if (docsColor) {
+          await this.executeBrowserTool({ action: 'set_text_color', color: docsColor });
+          done.push(`changed text color to ${docsColor}`);
+        }
+        if (wantsHeaderFooter) {
+          await this.executeBrowserTool({ action: 'add_header_footer', headerText: 'Header', footerText: 'Footer' });
+          done.push('added header/footer placeholders');
+        }
+        reply = done.length > 0
+          ? `Done: ${done.join(', ')} in the current Google Doc.`
+          : 'I am ready to edit the Google Doc. Tell me exactly what to change.';
+      } catch (err) {
+        reply = `Google Docs edit error: ${err instanceof Error ? err.message : String(err)}`;
+      }
+      this.history.push({ role: 'assistant', content: reply });
+      return reply;
+    }
+
+    const openLeetCodeSolutionsFollowUp = userMessage.trim().match(
+      /^(?:open|show|go\s+to|navigate\s+to)\s+(?:the\s+)?solutions?(?:\s+page)?(?:\s+of\s+(?:it|this|that))?(?:\s+in\s+leetcode(?:\.com)?)?(?:\s+in\s+(?:chrome|browser))?$/i,
+    );
+    if (openLeetCodeSolutionsFollowUp && this.browserContextActive) {
+      this.history.push({ role: 'user', content: userMessage });
+      if (!this.lastLeetCodeSlug) {
+        const reply = 'I do not have a recent LeetCode problem in browser context yet. Open a LeetCode problem first, then I can open its solutions page.';
+        this.history.push({ role: 'assistant', content: reply });
+        return reply;
+      }
+
+      const wantsNewTab = /\bnew\s+tab\b/i.test(userMessage);
+      const url = `https://leetcode.com/problems/${this.lastLeetCodeSlug}/solutions/`;
+      let reply: string;
+      try {
+        reply = await this.executeBrowserTool({ action: 'navigate', url, newTab: wantsNewTab });
+      } catch (err) {
+        reply = `Open LeetCode solutions error: ${err instanceof Error ? err.message : String(err)}`;
       }
       this.history.push({ role: 'assistant', content: reply });
       return reply;
@@ -729,6 +1640,7 @@ export class Engine {
           let reply: string;
           try {
             reply = await executeTool('screenAutomation', { action: 'navigate', path: folders[0] });
+            this.rememberNavigatedFolder(folders[0]!);
           } catch (err) {
             reply = `Navigate error: ${err instanceof Error ? err.message : String(err)}`;
           }
@@ -758,6 +1670,7 @@ export class Engine {
               action: 'navigate',
               path: filePaths[0],
             });
+            this.lastOpenedFilePath = filePaths[0]!;
           } else {
             this.pendingSelection = { kind: 'open-file', options: filePaths };
             reply = buildFileChoicePrompt(target, filePaths);
@@ -786,18 +1699,132 @@ export class Engine {
       return reply;
     }
 
+    const openFileInFolderMatch = userMessage.trim().match(
+      /^open\s+(.+?)\s+in\s+(?:the\s+)?(.+?)\s+folder$/i,
+    );
+    if (openFileInFolderMatch) {
+      this.history.push({ role: 'user', content: userMessage });
+
+      const fileName = openFileInFolderMatch[1]!.trim();
+      const folderName = openFileInFolderMatch[2]!.trim();
+      const folders = findFoldersByName(folderName);
+
+      if (folders.length === 0) {
+        const reply = `I couldn't find a folder named "${folderName}".`;
+        this.history.push({ role: 'assistant', content: reply });
+        return reply;
+      }
+
+      const openFromFolder = async (folderPath: string): Promise<string> => {
+        const directPath = join(folderPath, fileName);
+        if (existsSync(directPath)) {
+          const opened = await executeTool('screenAutomation', {
+            action: 'navigate',
+            path: directPath,
+          });
+          this.lastOpenedFilePath = directPath;
+          this.rememberNavigatedFolder(folderPath);
+          return opened;
+        }
+
+        const lookup = await executeTool('findFile', {
+          query: fileName,
+          dir: folderPath,
+          sort_by: 'score',
+          max_results: 8,
+        });
+        const filePaths = parseFindFilePaths(lookup);
+        if (filePaths.length === 0) {
+          return `I couldn't find "${fileName}" inside ${folderPath}.`;
+        }
+        if (filePaths.length === 1) {
+          const opened = await executeTool('screenAutomation', {
+            action: 'navigate',
+            path: filePaths[0],
+          });
+          this.lastOpenedFilePath = filePaths[0]!;
+          this.rememberNavigatedFolder(folderPath);
+          return opened;
+        }
+
+        this.pendingSelection = { kind: 'open-file', options: filePaths };
+        return buildFileChoicePrompt(fileName, filePaths);
+      };
+
+      if (folders.length === 1) {
+        let reply: string;
+        try {
+          reply = await openFromFolder(folders[0]!);
+        } catch (err) {
+          reply = `Open file error: ${err instanceof Error ? err.message : String(err)}`;
+        }
+        this.history.push({ role: 'assistant', content: reply });
+        return reply;
+      }
+
+      this.pendingSelection = { kind: 'navigate-folder', options: folders };
+      const reply = `I found multiple folders named "${folderName}":\n${folders.map((f, i) => `${i + 1}. ${f}`).join('\n')}\nType 1 to choose the folder first, then I'll open "${fileName}".`;
+      this.history.push({ role: 'assistant', content: reply });
+      return reply;
+    }
+
+    const folderIntent = extractFolderIntent(userMessage);
+    if (folderIntent) {
+      const { mode, folderName } = folderIntent;
+      const folders = findFoldersByName(folderName);
+      this.history.push({ role: 'user', content: userMessage });
+
+      if (folders.length === 0) {
+        const reply = `I couldn't find a folder named "${folderName}".`;
+        this.history.push({ role: 'assistant', content: reply });
+        return reply;
+      }
+
+      if (mode === 'open' && folders.length === 1) {
+        let reply: string;
+        try {
+          reply = await executeTool('screenAutomation', {
+            action: 'navigate',
+            path: folders[0],
+          });
+          this.rememberNavigatedFolder(folders[0]!);
+        } catch (err) {
+          reply = `Navigate error: ${err instanceof Error ? err.message : String(err)}`;
+        }
+        this.history.push({ role: 'assistant', content: reply });
+        return reply;
+      }
+
+      this.pendingSelection = { kind: 'navigate-folder', options: folders };
+      const reply = mode === 'find'
+        ? `I found ${folders.length} folder match(es) for "${folderName}":\n${folders.map((f, i) => `${i + 1}. ${f}`).join('\n')}\nType 1 to open the first folder, 2 for the second, and so on.`
+        : buildFolderChoicePrompt(folderName, folders);
+      this.history.push({ role: 'assistant', content: reply });
+      return reply;
+    }
+
     const genericOpenMatch = userMessage.trim().match(/^open\s+(.+)$/i);
     const isRecentDownloadOpen = genericOpenMatch
       ? /^(?:the\s+)?(?:last(?:ly|est)?\s+downloaded|latest\s+downloaded|most\s+recent(?:ly)?\s+downloaded|recently\s+downloaded)\b/i.test(genericOpenMatch[1]!.trim())
       : false;
+    const isFolderOpenText = genericOpenMatch
+      ? /\bfolder\b/i.test(genericOpenMatch[1]!.trim())
+      : false;
     const isSimpleOpen = genericOpenMatch ? !isChainedInstruction(genericOpenMatch[1]!.trim()) : false;
-    if (genericOpenMatch && !isRecentDownloadOpen && isSimpleOpen) {
-      const target = genericOpenMatch[1]!.trim();
+    if (genericOpenMatch && !isRecentDownloadOpen && !isFolderOpenText && isSimpleOpen) {
+      const rawTarget = genericOpenMatch[1]!.trim();
+      const target = extractExplicitPathFromText(rawTarget) ?? rawTarget;
+      const wantsNewTab = /\bnew\s+tab\b/i.test(target) || /\bnew\s+tab\b/i.test(userMessage);
+      const searchTarget = normaliseSearchTarget(target);
+      const inferredExtensions = inferExtensionsFromQuery(target);
       this.history.push({ role: 'user', content: userMessage });
 
-      const openInBrowserMatch = target.match(/^(.+?)\s+in\s+(chrome|chromium|edge|firefox|safari|browser)$/i);
+      const openInBrowserMatch = target.match(/^(.+?)\s+in\s+(?:(?:(?:a|the)\s+)?new\s+tab\s+in\s+)?(chrome|chromium|edge|firefox|safari|browser)$/i);
       if (openInBrowserMatch) {
-        const rawSite = openInBrowserMatch[1]!.trim();
+        const rawSite = openInBrowserMatch[1]!
+          .trim()
+          .replace(/\s+in\s+(?:(?:a|the)\s+)?new\s+tab$/i, '')
+          .trim();
         const browserName = openInBrowserMatch[2]!.trim();
         const url = normaliseWebsiteTarget(rawSite);
 
@@ -809,8 +1836,8 @@ export class Engine {
 
         let reply: string;
         try {
-          reply = await executeTool('browserAutomation', { action: 'navigate', url });
-          reply += ` (using Playwright Chromium; requested browser: ${browserName})`;
+          reply = await this.executeBrowserTool({ action: 'navigate', url, newTab: wantsNewTab });
+          reply += ` (requested browser: ${browserName})`;
         } catch (err) {
           reply = `Open website error: ${err instanceof Error ? err.message : String(err)}`;
         }
@@ -833,7 +1860,7 @@ export class Engine {
       if (looksLikeWebTarget(target)) {
         let reply: string;
         try {
-          reply = await executeTool('browserAutomation', { action: 'navigate', url: target });
+          reply = await this.executeBrowserTool({ action: 'navigate', url: target, newTab: wantsNewTab });
         } catch (err) {
           reply = `Open website error: ${err instanceof Error ? err.message : String(err)}`;
         }
@@ -842,12 +1869,17 @@ export class Engine {
       }
 
       try {
-        const resolvedTarget = resolvePath(target);
+        const resolvedTarget = this.resolveWithinCurrentDirectory(target);
         if (existsSync(resolvedTarget)) {
           const reply = await executeTool('screenAutomation', {
             action: 'navigate',
             path: resolvedTarget,
           });
+          if (isLikelyFilePath(resolvedTarget)) {
+            this.lastOpenedFilePath = resolvedTarget;
+          } else {
+            this.rememberNavigatedFolder(resolvedTarget);
+          }
           this.history.push({ role: 'assistant', content: reply });
           return reply;
         }
@@ -855,21 +1887,12 @@ export class Engine {
         // Not a valid alias/path target; continue with search strategies.
       }
 
-      if (looksLikeAppTarget(target)) {
-        try {
-          const reply = await executeTool('screenAutomation', { action: 'launch', app: target });
-          this.history.push({ role: 'assistant', content: reply });
-          return reply;
-        } catch {
-          // App launch failed; continue with folder/file search.
-        }
-      }
-
-      const folderMatches = findFoldersByName(target);
+      const folderMatches = findFoldersByName(searchTarget);
       if (folderMatches.length === 1) {
         let reply: string;
         try {
           reply = await executeTool('screenAutomation', { action: 'navigate', path: folderMatches[0] });
+          this.rememberNavigatedFolder(folderMatches[0]!);
         } catch (err) {
           reply = `Navigate error: ${err instanceof Error ? err.message : String(err)}`;
         }
@@ -885,17 +1908,17 @@ export class Engine {
 
       try {
         const lookup = await executeTool('findFile', {
-          query: target,
+          query: searchTarget,
+          ...(this.currentDirectory ? { dir: this.currentDirectory } : {}),
+          ...(inferredExtensions ? { extensions: inferredExtensions } : {}),
           sort_by: 'recent',
           max_results: 8,
         });
         const filePaths = parseFindFilePaths(lookup);
 
         if (filePaths.length === 1) {
-          const reply = await executeTool('screenAutomation', {
-            action: 'navigate',
-            path: filePaths[0],
-          });
+          this.pendingSelection = { kind: 'open-file', options: filePaths };
+          const reply = buildFileChoicePrompt(target, filePaths);
           this.history.push({ role: 'assistant', content: reply });
           return reply;
         }
@@ -925,45 +1948,6 @@ export class Engine {
       this.history.push({ role: 'assistant', content: reply });
       return reply;
     }
-
-    const openFolderMatch = userMessage
-      .trim()
-      .match(/^(?:open|show(?:\s+me)?|navigate\s+to|go\s+to)\s+(?:the\s+)?(.+?)\s+folder(?:\s+.*)?$/i);
-    if (openFolderMatch) {
-      const folderName = openFolderMatch[1]!.trim();
-      const folders = findFoldersByName(folderName);
-
-      this.history.push({ role: 'user', content: userMessage });
-
-      if (folders.length === 0) {
-        const reply = `I couldn't find a folder named "${folderName}".`;
-        this.history.push({ role: 'assistant', content: reply });
-        return reply;
-      }
-
-      if (folders.length === 1) {
-        let reply: string;
-        try {
-          reply = await executeTool('screenAutomation', {
-            action: 'navigate',
-            path: folders[0],
-          });
-        } catch (err) {
-          reply = `Navigate error: ${err instanceof Error ? err.message : String(err)}`;
-        }
-        this.history.push({ role: 'assistant', content: reply });
-        return reply;
-      }
-
-      this.pendingSelection = {
-        kind: 'navigate-folder',
-        options: folders,
-      };
-      const reply = buildFolderChoicePrompt(folderName, folders);
-      this.history.push({ role: 'assistant', content: reply });
-      return reply;
-    }
-    // ─────────────────────────────────────────────────────────────────────────
 
   // ── Keyword bypass — delete folder directly without going through LLM ────
   const deleteFolderMatch = userMessage
@@ -997,6 +1981,31 @@ export class Engine {
     // ─────────────────────────────────────────────────────────────────────────
 
     // ── Keyword bypass — create folder directly without going through LLM ────
+    const createFolderInCurrentMatch = userMessage
+      .trim()
+      .match(/^(?:create|make|new)\s+(?:a\s+)?(?:folder|directory|dir)\s+(?:called|named)\s+(.+?)\s+in\s+(?:it|this|that|here)$/i);
+    if (createFolderInCurrentMatch) {
+      this.history.push({ role: 'user', content: userMessage });
+
+      if (!this.currentDirectory) {
+        const reply = 'I do not have a current folder context yet. Open or navigate to a folder first.';
+        this.history.push({ role: 'assistant', content: reply });
+        return reply;
+      }
+
+      const folderName = createFolderInCurrentMatch[1]!.trim();
+      const fullPath = join(this.currentDirectory, folderName);
+      let reply: string;
+      try {
+        reply = await this.executeWithHistory('createDirectory', { path: fullPath });
+      } catch (err) {
+        reply = `Create folder error: ${err instanceof Error ? err.message : String(err)}`;
+      }
+
+      this.history.push({ role: 'assistant', content: reply });
+      return reply;
+    }
+
     const createFolderMatch = userMessage
       .trim()
       .match(
@@ -1015,6 +2024,191 @@ export class Engine {
       }
       this.history.push({ role: 'assistant', content: reply! });
       return reply!;
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // ── Keyword bypass — organize .exe files in Downloads into a named folder ──
+    const organizeExeMatch = userMessage.trim().match(
+      /^(?:organi[sz]e|move)\s+(?:all\s+)?(?:the\s+)?(?:\.?exe|exe)\s+files?.*\bdownloads\b.*(?:named|called)\s+(.+)$/i,
+    );
+    const organizeExeDefaultMatch = userMessage.trim().match(
+      /^(?:organi[sz]e|move)\s+(?:all\s+)?(?:the\s+)?(?:\.?exe|exe)\s+files?.*\bdownloads\b/i,
+    );
+    if (organizeExeMatch || organizeExeDefaultMatch) {
+      this.history.push({ role: 'user', content: userMessage });
+
+      const targetFolderName = (organizeExeMatch?.[1] ?? 'Apps').trim();
+      let reply: string;
+      try {
+        const downloadsDir = resolvePath('downloads');
+        const destinationDir = join(downloadsDir, targetFolderName);
+        const destinationExistedBefore = existsSync(destinationDir);
+
+        await executeTool('createDirectory', { path: destinationDir });
+
+        const exeFiles = readdirSync(downloadsDir, { withFileTypes: true })
+          .filter((e) => e.isFile() && extname(e.name).toLowerCase() === '.exe')
+          .map((e) => e.name)
+          .sort((a, b) => a.localeCompare(b));
+
+        if (exeFiles.length === 0) {
+          reply = `No .exe files found in ${downloadsDir}.`;
+        } else {
+          let moved = 0;
+          const movedNames: string[] = [];
+          const skipped: string[] = [];
+          const actualMoves: Array<{ source: string; destination: string }> = [];
+          for (const fileName of exeFiles) {
+            const source = join(downloadsDir, fileName);
+            const destination = join(destinationDir, fileName);
+            try {
+              await executeTool('moveFile', {
+                source,
+                destination,
+                create_parent: true,
+              });
+              moved += 1;
+              movedNames.push(fileName);
+              actualMoves.push({ source, destination });
+            } catch {
+              skipped.push(fileName);
+            }
+          }
+
+          if (actualMoves.length > 0) {
+            this.undoStack.push({
+              description: `organise ${actualMoves.length} .exe file${actualMoves.length !== 1 ? 's' : ''} in Downloads`,
+              undo: async () => {
+                for (const { source, destination } of [...actualMoves].reverse()) {
+                  await mkdir(dirname(source), { recursive: true });
+                  await rename(destination, source);
+                }
+                if (!destinationExistedBefore) {
+                  try {
+                    await rmdir(destinationDir);
+                  } catch {
+                    // Keep folder if not empty.
+                  }
+                }
+              },
+              redo: async () => {
+                await mkdir(destinationDir, { recursive: true });
+                for (const { source, destination } of actualMoves) {
+                  await mkdir(dirname(destination), { recursive: true });
+                  await rename(source, destination);
+                }
+              },
+            });
+          }
+
+          const movedList = movedNames.slice(0, 10).map((n, i) => `${i + 1}. ${n}`).join('\n');
+          const skippedText = skipped.length > 0
+            ? `\nSkipped ${skipped.length} file(s) (already exists or locked).`
+            : '';
+          reply = `Moved ${moved} .exe file(s) to ${destinationDir}.${skippedText}\n${moved > 0 ? `Examples:\n${movedList}` : ''}`.trim();
+        }
+
+        this.rememberNavigatedFolder(downloadsDir);
+      } catch (err) {
+        reply = `Organize .exe error: ${err instanceof Error ? err.message : String(err)}`;
+      }
+
+      this.history.push({ role: 'assistant', content: reply });
+      return reply;
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // ── Keyword bypass — organize .zip files into a named folder ───────────
+    const organizeZipMatch = userMessage.trim().match(
+      /^(?:organi[sz]e|move)\s+(?:all\s+)?(?:the\s+)?(?:\.?zip|zip)\s+files?.*(?:named|called)\s+"?([^"\n]+)"?$/i,
+    );
+    const organizeZipDefaultMatch = userMessage.trim().match(
+      /^(?:organi[sz]e|move)\s+(?:all\s+)?(?:the\s+)?(?:\.?zip|zip)\s+files?.*$/i,
+    );
+    if (organizeZipMatch || organizeZipDefaultMatch) {
+      this.history.push({ role: 'user', content: userMessage });
+
+      const targetFolderName = (organizeZipMatch?.[1] ?? 'ZIPs').trim();
+      let reply: string;
+      try {
+        const lower = userMessage.toLowerCase();
+        const baseDir = lower.includes('downloads')
+          ? resolvePath('downloads')
+          : (this.currentDirectory ?? resolvePath('downloads'));
+        const destinationDir = join(baseDir, targetFolderName);
+        const destinationExistedBefore = existsSync(destinationDir);
+
+        await executeTool('createDirectory', { path: destinationDir });
+
+        const zipFiles = readdirSync(baseDir, { withFileTypes: true })
+          .filter((e) => e.isFile() && extname(e.name).toLowerCase() === '.zip')
+          .map((e) => e.name)
+          .sort((a, b) => a.localeCompare(b));
+
+        if (zipFiles.length === 0) {
+          reply = `No .zip files found in ${baseDir}.`;
+        } else {
+          let moved = 0;
+          const movedNames: string[] = [];
+          const skipped: string[] = [];
+          const actualMoves: Array<{ source: string; destination: string }> = [];
+          for (const fileName of zipFiles) {
+            const source = join(baseDir, fileName);
+            const destination = join(destinationDir, fileName);
+            try {
+              await executeTool('moveFile', {
+                source,
+                destination,
+                create_parent: true,
+              });
+              moved += 1;
+              movedNames.push(fileName);
+              actualMoves.push({ source, destination });
+            } catch {
+              skipped.push(fileName);
+            }
+          }
+
+          if (actualMoves.length > 0) {
+            this.undoStack.push({
+              description: `organise ${actualMoves.length} .zip file${actualMoves.length !== 1 ? 's' : ''} in ${basename(baseDir)}`,
+              undo: async () => {
+                for (const { source, destination } of [...actualMoves].reverse()) {
+                  await mkdir(dirname(source), { recursive: true });
+                  await rename(destination, source);
+                }
+                if (!destinationExistedBefore) {
+                  try {
+                    await rmdir(destinationDir);
+                  } catch {
+                    // Keep folder if not empty.
+                  }
+                }
+              },
+              redo: async () => {
+                await mkdir(destinationDir, { recursive: true });
+                for (const { source, destination } of actualMoves) {
+                  await mkdir(dirname(destination), { recursive: true });
+                  await rename(source, destination);
+                }
+              },
+            });
+          }
+
+          const movedList = movedNames.slice(0, 10).map((n, i) => `${i + 1}. ${n}`).join('\n');
+          const skippedText = skipped.length > 0
+            ? `\nSkipped ${skipped.length} file(s) (already exists or locked).`
+            : '';
+          reply = `Moved ${moved} .zip file(s) to ${destinationDir}.${skippedText}\n${moved > 0 ? `Examples:\n${movedList}` : ''}`.trim();
+        }
+
+        this.rememberNavigatedFolder(baseDir);
+      } catch (err) {
+        reply = `Organize .zip error: ${err instanceof Error ? err.message : String(err)}`;
+      }
+
+      this.history.push({ role: 'assistant', content: reply });
+      return reply;
     }
     // ─────────────────────────────────────────────────────────────────────────
 
@@ -1043,6 +2237,7 @@ export class Engine {
             action: 'navigate',
             path: navigateMatch[1]!.trim(),
           });
+          this.rememberNavigatedFolder(navigateMatch[1]!.trim());
         } catch (err) {
           reply = `Navigate error: ${err instanceof Error ? err.message : String(err)}`;
         }
@@ -1110,6 +2305,56 @@ export class Engine {
       } catch (err) {
         reply = `Error opening last downloaded ${typeHint}: ${err instanceof Error ? err.message : String(err)}`;
       }
+      this.history.push({ role: 'assistant', content: reply });
+      return reply;
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // ── Keyword bypass — list recent files in Downloads by time window ─────
+    // e.g. "list the last week downloaded files"
+    const listDownloadedMatch = userMessage.trim().match(
+      /^(?:list|show(?:\s+me)?)\s+(?:the\s+)?(?:files\s+)?(?:downloaded\s+)?(?:in\s+)?(last_week|last_month|last_3_months|last_year|last\s+week|last\s+month|last\s+3\s+months|last\s+year)\s+(?:downloaded\s+)?files?$/i,
+    );
+    if (listDownloadedMatch) {
+      this.history.push({ role: 'user', content: userMessage });
+
+      const rawSince = (listDownloadedMatch[1] ?? '').toLowerCase().replace(/\s+/g, '_');
+      const sinceDate = resolveSinceDate(rawSince);
+      let reply: string;
+
+      if (!sinceDate) {
+        reply = 'I could not parse the requested time window. Try: last week, last month, last 3 months, or last year.';
+      } else {
+        try {
+          const downloadsDir = resolvePath('downloads');
+          const entries = readdirSync(downloadsDir, { withFileTypes: true })
+            .filter((e) => e.isFile())
+            .map((e) => {
+              const full = join(downloadsDir, e.name);
+              const mtime = statSync(full).mtime;
+              return { name: e.name, full, mtime };
+            })
+            .filter((f) => f.mtime >= sinceDate)
+            .sort((a, b) => b.mtime.getTime() - a.mtime.getTime());
+
+          this.rememberNavigatedFolder(downloadsDir);
+
+          if (entries.length === 0) {
+            reply = `No downloaded files found since ${sinceDate.toLocaleDateString()} in ${downloadsDir}.`;
+          } else {
+            this.lastListedEntries = entries.map((e) => ({ path: e.full, isDirectory: false }));
+            const top = entries.slice(0, 25);
+            const lines = top.map((f, i) => `${i + 1}. ${f.name}`);
+            const more = entries.length > top.length
+              ? `\n...and ${entries.length - top.length} more file(s).`
+              : '';
+            reply = `Downloaded files since ${sinceDate.toLocaleDateString()} in ${downloadsDir}:\n${lines.join('\n')}${more}`;
+          }
+        } catch (err) {
+          reply = `List downloads error: ${err instanceof Error ? err.message : String(err)}`;
+        }
+      }
+
       this.history.push({ role: 'assistant', content: reply });
       return reply;
     }
@@ -1226,6 +2471,7 @@ export class Engine {
     this.pendingConfirmation = null;
     this.pendingSelection = null;
     this.pendingOpenClarification = null;
+    this.browserContextActive = false;
     this.undoStack.clear();
     this.lastSavedIdx = 0;
   }
