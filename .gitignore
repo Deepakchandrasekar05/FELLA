@@ -2,6 +2,8 @@
 node_modules/
 dist/
 bin/fella-win.exe
+bin/fella-win-test.exe
+bin/fella-win-test2.exe
 bin/fella-linux
 bin/fella-macos
 GUIDE.md
