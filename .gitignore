@@ -7,3 +7,6 @@ bin/fella-win-test2.exe
 bin/fella-linux
 bin/fella-macos
 GUIDE.md
+desktop/
+desktop-dist/
+scripts/

@@ -154,6 +154,21 @@ function assertAllowedLinux(absPath: string): void {
   );
 }
 
+function remapWindowsKnownFolderPath(rawPath: string): string {
+  if (process.platform !== 'win32') return rawPath;
+
+  const normalized = rawPath.replace(/\//g, '\\');
+  const match = normalized.match(/^([a-z]:\\users\\[^\\]+\\)(desktop|documents|downloads|pictures|music|videos)(\\.*)?$/i);
+  if (!match) return rawPath;
+
+  const folder = (match[2] ?? '').toLowerCase();
+  const suffix = (match[3] ?? '').replace(/^\\+/, '');
+  const mappedBase = knownFolders[folder];
+  if (!mappedBase) return rawPath;
+
+  return suffix ? join(mappedBase, suffix) : mappedBase;
+}
+
 export function assertAllowed(absPath: string): void {
   if (process.platform === 'win32') {
     assertAllowedWindows(absPath);
@@ -184,7 +199,7 @@ export function resolvePath(raw: string): string {
     if (aliasKey && Object.prototype.hasOwnProperty.call(knownFolders, aliasKey)) {
       resolvedPath = join(knownFolders[aliasKey]!, trimmed.slice(sepIdx + 1));
     } else if (isAbsolute(trimmed)) {
-      resolvedPath = resolve(trimmed);
+      resolvedPath = resolve(remapWindowsKnownFolderPath(trimmed));
     } else {
       resolvedPath = resolve(join(home, trimmed));
     }

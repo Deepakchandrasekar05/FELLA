@@ -6,7 +6,7 @@
 // launching at all. We lazy-load Playwright only when the browser tool is used.
 import type { Browser, BrowserContext, Page } from 'playwright';
 import { spawn } from 'node:child_process';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
@@ -42,6 +42,7 @@ type BrowserAction =
   | 'set_font_size'
   | 'set_text_color'
   | 'add_header_footer'
+  | 'download_pdf'
   | 'close_tab'
   | 'close_all_tabs'
   | 'profile_selected'
@@ -228,6 +229,19 @@ function asPositiveNumberString(value: unknown): string {
   const parsed = Number.parseFloat(raw.replace(/pt$/i, '').trim());
   if (!Number.isFinite(parsed) || parsed <= 0) return '';
   return Number.isInteger(parsed) ? String(parsed) : String(parsed);
+}
+
+function sanitizeFileName(value: string): string {
+  const cleaned = value
+    .replace(/[<>:"/\\|?*]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return cleaned || 'document';
+}
+
+function extractGoogleDocId(url: string): string | null {
+  const match = url.match(/docs\.google\.com\/document\/d\/([^/]+)/i);
+  return match?.[1] ?? null;
 }
 
 function parseCommandFallback(args: Record<string, unknown>): Record<string, unknown> {
@@ -541,8 +555,8 @@ export async function browserAutomation(args: Record<string, unknown>): Promise<
       if (selector) {
         await currentPage.locator(selector).first().fill(text);
       } else {
-        const pageUrl = currentPage.url().toLowerCase();
-        if (pageUrl.includes('docs.google.com/document')) {
+        const localPageUrl = currentPage.url().toLowerCase();
+        if (localPageUrl.includes('docs.google.com/document')) {
           await appendToGoogleDoc(currentPage, text);
         } else {
           await focusGoogleDocsEditor(currentPage);
@@ -586,6 +600,36 @@ export async function browserAutomation(args: Record<string, unknown>): Promise<
       const filePath = join(folder, `shot-${Date.now()}.png`);
       await currentPage.screenshot({ path: filePath, fullPage: false });
       return `Screenshot saved: ${filePath}`;
+    }
+
+    case 'download_pdf': {
+      const downloadsDir = join(homedir(), 'Downloads');
+      await mkdir(downloadsDir, { recursive: true });
+
+      const provided = sanitizeFileName(asString(normalizedArgs['filename'] ?? normalizedArgs['name']));
+      const titleBased = sanitizeFileName(await currentPage.title().catch(() => 'document'));
+      const baseName = provided || titleBased;
+      const fileName = baseName.toLowerCase().endsWith('.pdf') ? baseName : `${baseName}.pdf`;
+      const filePath = join(downloadsDir, fileName);
+
+      const docId = extractGoogleDocId(currentPage.url());
+      if (docId) {
+        const exportUrl = `https://docs.google.com/document/d/${docId}/export?format=pdf`;
+        const response = await currentPage.context().request.get(exportUrl, { timeout: 20000 });
+        if (!response.ok()) {
+          throw new Error(`Google Docs export failed (${response.status()}).`);
+        }
+        const buffer = await response.body();
+        await writeFile(filePath, buffer);
+        return `Downloaded PDF to ${filePath}`;
+      }
+
+      try {
+        await currentPage.pdf({ path: filePath, printBackground: true, format: 'A4' });
+        return `Downloaded PDF to ${filePath}`;
+      } catch {
+        throw new Error('PDF export is currently supported for Google Docs pages in headed mode.');
+      }
     }
 
     case 'get_text': {
@@ -694,4 +738,22 @@ export async function browserAutomation(args: Record<string, unknown>): Promise<
     default:
       throw new Error(`Unknown browserAutomation action: ${action}`);
   }
+}
+
+export async function agenticBrowserTask(goal: string, onStep: (message: string) => void): Promise<string> {
+  const trimmedGoal = goal.trim();
+  if (!trimmedGoal) {
+    throw new Error('agenticBrowserTask: goal is required');
+  }
+
+  onStep('Using direct Playwright browser automation mode.');
+
+  const looksLikeUrl = /^https?:\/\//i.test(trimmedGoal)
+    || /^[a-z0-9.-]+\.[a-z]{2,}(?:\/.*)?$/i.test(trimmedGoal);
+
+  if (looksLikeUrl) {
+    return browserAutomation({ action: 'navigate', url: trimmedGoal });
+  }
+
+  return browserAutomation({ action: 'search', query: trimmedGoal });
 }

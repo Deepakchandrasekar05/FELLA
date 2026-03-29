@@ -12,7 +12,7 @@ import { createDirectory }   from './createDirectory.js';
 import { organiseByRule }    from './organiseByRule.js';
 import { openSettings }      from './openSettings.js';
 import { screenAutomation }  from './screenAutomation.js';
-import { browserAutomation } from './browserAutomation';
+import { browserAutomation } from './browserAutomation.js';
 import { TOOL_NAMES, type ToolName } from '../llm/schema.js';
 
 type ToolArgs    = Record<string, unknown>;
@@ -90,6 +90,10 @@ const ALIASES: Record<string, ToolName> = {
   playwright:           'browserAutomation',
   web:                  'browserAutomation',
   web_automation:       'browserAutomation',
+  openbrowser:          'browserAutomation',
+  openurl:              'browserAutomation',
+  opengoogledrive:      'browserAutomation',
+  findfileinbrowser:    'browserAutomation',
 };
 
 /** Resolve an alias or canonical name to the registered ToolName, or return as-is. */

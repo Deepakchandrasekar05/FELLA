@@ -146,6 +146,11 @@ export class MemoryStore {
       .run(new Date().toISOString(), id);
   }
 
+  deleteSession(sessionId: string): void {
+    this.db.prepare('delete from session_turns where session_id = ?').run(sessionId);
+    this.db.prepare('delete from sessions where id = ?').run(sessionId);
+  }
+
   appendTurn(
     sessionId: string,
     role: string,

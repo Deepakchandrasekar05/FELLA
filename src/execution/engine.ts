@@ -11,6 +11,7 @@ import { LLMClient } from '../llm/client.js';
 import { resolvePath } from '../security/pathGuard.js';
 import { extractSettingRequest, getBatteryStatus } from '../tools/openSettings.js';
 import { executeTool, resolveToolName } from '../tools/registry.js';
+import { agenticBrowserTask } from '../tools/browserAutomation';
 import { UndoStack }            from './history.js';
 import { buildPlan, executePlan, resolveSinceDate } from '../tools/organiseByRule.js';
 import { MemoryStore } from '../memory/store.js';
@@ -258,6 +259,69 @@ function looksLikeAppTarget(target: string): boolean {
   if (words.length === 0 || words.length > 4) return false;
 
   return /^[a-z0-9][a-z0-9 _.-]{0,40}$/i.test(trimmed);
+}
+
+function normaliseAppKey(target: string): string {
+  return target.trim().toLowerCase().replace(/\s+/g, '');
+}
+
+const KNOWN_APP_KEYS = new Set([
+  // Windows allowlist
+  'notepad',
+  'explorer',
+  'calculator',
+  'calc',
+  'vscode',
+  'browser',
+  'chrome',
+  'msedge',
+  'edge',
+  'firefox',
+  'terminal',
+  'paint',
+  'wordpad',
+  'powershell',
+  'cmd',
+  'excel',
+  'word',
+  'winword',
+  'powerpoint',
+  'outlook',
+  'taskmgr',
+  'regedit',
+  'snipping',
+  // Common aliases
+  'visualstudiocode',
+  'microsoftedge',
+  'googlechrome',
+  'windowsterminal',
+]);
+
+function isKnownAppTarget(target: string): boolean {
+  return KNOWN_APP_KEYS.has(normaliseAppKey(target));
+}
+
+function shouldAskOpenKindClarification(target: string): boolean {
+  const trimmed = target.trim();
+  if (!trimmed) return false;
+
+  if (/\b(?:application|app|program|exe|file|shortcut|folder|directory|setting|settings|control panel)\b/i.test(trimmed)) {
+    return false;
+  }
+  if (looksLikeWebTarget(trimmed)) return false;
+  if (isKnownAppTarget(trimmed)) return false;
+  if (/^[a-z]:[\\/]/i.test(trimmed) || trimmed.startsWith('/') || trimmed.includes('\\') || trimmed.includes('/')) {
+    return false;
+  }
+  if (/\.(?:txt|pdf|docx?|xlsx?|pptx?|csv|jpg|jpeg|png|gif|webp|mp4|mkv|avi|mov|mp3|wav|zip|rar|7z|lnk|exe|msi|bat|cmd)$/i.test(trimmed)) {
+    return false;
+  }
+  if (isChainedInstruction(trimmed)) return false;
+
+  const words = trimmed.split(/\s+/).filter(Boolean);
+  if (words.length === 0 || words.length > 5) return false;
+
+  return /^[a-z0-9][a-z0-9 _.-]{0,60}$/i.test(trimmed);
 }
 
 function looksLikeWebTarget(target: string): boolean {
@@ -625,6 +689,9 @@ export class Engine {
   /** Pending user clarification for ambiguous open intent target. */
   private pendingOpenClarification: PendingOpenClarification | null = null;
 
+  /** Pending context switch confirmation (escaping browser to desktop). */
+  private pendingContextSwitch: string | null = null;
+
   /** Last file opened successfully, used for follow-ups like "open it with VLC". */
   private lastOpenedFilePath: string | null = null;
 
@@ -658,11 +725,16 @@ export class Engine {
   }
 
   private async generateDocsDraft(topic: string): Promise<string> {
-    const prompt = `Write a short polished paragraph (5-7 sentences) for a Google Doc about: ${topic}. Return plain text only.`;
+    const prompt = [
+      `Write polished Google Doc content about: ${topic}.`,
+      'Return plain text only.',
+      'Length: 2 concise paragraphs.',
+      'No markdown, no bullet points unless the topic clearly requires a list.',
+    ].join(' ');
     const out = await this.llmClient.chat([{ role: 'user', content: prompt }]);
     const generated = typeof out.response === 'string' ? out.response.trim() : '';
     if (generated) return generated;
-    return `${topic} focuses on designing software as collaborating objects with clear responsibilities, reusable abstractions, and maintainable interfaces. It emphasizes encapsulation, inheritance, and polymorphism to model complex domains in a structured way. In practice, teams apply object-oriented principles to improve readability, reduce coupling, and support long-term evolution of the codebase. Good object-oriented software engineering also values testing, code reviews, and iterative refactoring so designs stay aligned with changing requirements.`;
+    throw new Error('Could not generate draft content from LLM response.');
   }
 
   private rememberNavigatedFolder(pathOrAlias: string): void {
@@ -1042,6 +1114,69 @@ export class Engine {
       return reply;
     }
 
+    // ── Browser Context Lock ─────────────────────────────────────────────────
+    if (this.pendingContextSwitch) {
+      if (CONFIRM_WORDS.has(trimmed)) {
+        const savedCmd = this.pendingContextSwitch;
+        this.pendingContextSwitch = null;
+        this.browserContextActive = false;
+        // Don't push to history here; sendInner will do it for the savedCmd
+        return await this.sendInner(savedCmd, onStep);
+      }
+      if (CANCEL_WORDS.has(trimmed)) {
+        this.pendingContextSwitch = null;
+        this.history.push({ role: 'user', content: userMessage });
+        const reply = 'Cancelled. Staying in the browser.';
+        this.history.push({ role: 'assistant', content: reply });
+        return reply;
+      }
+      // User said something else, clear pending and let the new message flow through
+      this.pendingContextSwitch = null;
+    }
+
+    const EXPLICIT_BROWSER_KEYWORDS = /\b(chrome|browser|web|site|url|link|domain|http|https|google\s+d(?:rive|ocs?|sheets?|slides?)|gmail|youtube|github|leetcode|linkedin|twitter|facebook|instagram|reddit|stackoverflow)\b/i;
+    const EXPLICIT_SYSTEM_KEYWORDS = /\b(folder|directory|file|system|app|application|control\s+panel|settings?|pc|computer|downloaded|downloads|home|local)\b/i;
+    const IS_BASIC_COMMAND = /^(?:undo|redo|cd|close|exit)\b/i.test(trimmed);
+    const docsWriteIntentInContext = extractDocsWriteRequest(userMessage)
+      || (/\b(write|type|draft|compose|add|insert)\b/i.test(userMessage)
+        && /\b(?:about|on)\s+.+/i.test(userMessage));
+    const docsRenameIntentInContext = extractDocsRenameRequest(userMessage);
+    const pdfExportIntentInContext = /^(?:download|save|export)\s+(?:this\s+|the\s+|current\s+)?(?:page|document|doc|file)?\s*(?:as\s+)?pdf(?:\s+(?:as|named)\s+(.+))?$/i.test(userMessage.trim());
+
+    if (this.browserContextActive && !IS_BASIC_COMMAND && !this.pendingConfirmation && !this.pendingSelection && !this.pendingOpenClarification) {
+      const isSystemCommand = EXPLICIT_SYSTEM_KEYWORDS.test(trimmed) || (/^(?:open|launch|start|run|list|show)\s+(?![a-z]+(?:\.[a-z]+)+)/i.test(trimmed) && !EXPLICIT_BROWSER_KEYWORDS.test(trimmed));
+      if (isSystemCommand) {
+        this.pendingContextSwitch = userMessage;
+        this.history.push({ role: 'user', content: userMessage });
+        const reply = 'You are currently inside Chrome. Do you want to switch back to home to do this? (yes / no)';
+        this.history.push({ role: 'assistant', content: reply });
+        return reply;
+      }
+
+      // Let contextual document intents flow into deterministic handlers below.
+      // This preserves "in it" statefulness for active Docs tabs.
+      if (docsWriteIntentInContext || docsRenameIntentInContext || pdfExportIntentInContext) {
+        // Continue to dedicated handlers later in sendInner.
+      } else {
+        // Forceful agentic fallback for anything else in browser context.
+        this.history.push({ role: 'user', content: userMessage });
+        try {
+          const reply = await agenticBrowserTask(userMessage, (stepMsg) => {
+            if (onStep) {
+              onStep({ thought: '', tool: 'browserAutomation', args: {}, result: stepMsg, success: true, timestamp: new Date().toISOString() });
+            }
+          });
+          this.history.push({ role: 'assistant', content: reply });
+          return reply;
+        } catch (err) {
+          const errorReply = `Browser automation error: ${err instanceof Error ? err.message : String(err)}`;
+          this.history.push({ role: 'assistant', content: errorReply });
+          return errorReply;
+        }
+      }
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
     if (/^(?:cd\s*~?|home|go\s+home|come\s+out(?:\s+of\s+the\s+directory)?|come\s+to\s+home\s+dir(?:ectory)?)$/i.test(trimmed)) {
       this.history.push({ role: 'user', content: userMessage });
       const homeDir = resolvePath('home');
@@ -1172,9 +1307,96 @@ export class Engine {
       return reply;
     }
 
+    const pdfExportMatch = userMessage.trim().match(
+      /^(?:download|save|export)\s+(?:this\s+|the\s+|current\s+)?(?:page|document|doc|file)?\s*(?:as\s+)?pdf(?:\s+(?:as|named)\s+(.+))?$/i,
+    );
+    if (pdfExportMatch && this.browserContextActive) {
+      this.history.push({ role: 'user', content: userMessage });
+      const name = pdfExportMatch[1]?.trim() ?? '';
+      const filename = name ? (name.toLowerCase().endsWith('.pdf') ? name : `${name}.pdf`) : undefined;
+      let reply: string;
+      try {
+        reply = await this.executeBrowserTool({ action: 'download_pdf', filename });
+      } catch (err) {
+        reply = `Download PDF error: ${err instanceof Error ? err.message : String(err)}`;
+      }
+      this.history.push({ role: 'assistant', content: reply });
+      return reply;
+    }
+
+    const driveOpenDocMatch = userMessage.trim().match(
+      /^(?:open\s+google\s+drive)(?:\s+in\s+(?:chrome|browser))?(?:\s+and\s+open\s+(?:the\s+)?(?:document|doc|file)\s+(?:named|called)\s+(.+?))(?:\s+in\s+(?:chrome|browser))?$/i,
+    );
+    if (driveOpenDocMatch) {
+      this.history.push({ role: 'user', content: userMessage });
+      const docName = driveOpenDocMatch[1]!.trim();
+      let reply: string;
+      try {
+        await this.executeBrowserTool({ action: 'navigate', url: 'https://drive.google.com/' });
+        reply = await this.executeBrowserTool({ action: 'drive_open_item', name: docName });
+      } catch (err) {
+        reply = `Open Google Drive document error: ${err instanceof Error ? err.message : String(err)}`;
+      }
+      this.history.push({ role: 'assistant', content: reply });
+      return reply;
+    }
+
     const openInCurrentMatch = userMessage.trim().match(/^open\s+(.+?)\s+in\s+(?:it|this|that|here)\.?$/i);
     if (openInCurrentMatch) {
       this.history.push({ role: 'user', content: userMessage });
+      if (this.browserContextActive) {
+        const rawItemName = openInCurrentMatch[1]!.trim();
+        const cleanedItemName = rawItemName
+          .replace(/^the\s+/i, '')
+          .replace(/\s+(?:document|doc|file|folder|tab)\b.*$/i, '')
+          .trim();
+        const candidates = [rawItemName, cleanedItemName].filter(
+          (v, idx, arr) => Boolean(v) && arr.findIndex((x) => x.toLowerCase() === v.toLowerCase()) === idx,
+        );
+
+        let reply = `I couldn't find "${rawItemName}" on the current browser page.`;
+        try {
+          await this.executeBrowserTool({ action: 'snapshot' });
+          let opened = false;
+
+          // High-level Drive flow first: reliably opens files/folders by name in Drive.
+          try {
+            reply = await this.executeBrowserTool({ action: 'drive_open_item', name: rawItemName });
+            opened = true;
+          } catch {
+            // Fall back to generic click-by-text logic.
+          }
+
+          if (!opened) {
+            for (const candidate of candidates) {
+              try {
+                await this.executeBrowserTool({ action: 'click', text: candidate, doubleClick: true });
+                reply = `Opened "${candidate}" in the current browser context.`;
+                opened = true;
+                break;
+              } catch {
+                // Try a single click as a fallback for pages that do not support double-click.
+                await this.executeBrowserTool({ action: 'click', text: candidate });
+                reply = `Clicked "${candidate}" in the current browser context.`;
+                opened = true;
+                break;
+              }
+            }
+          }
+
+          if (!opened) {
+            reply =
+              `I couldn't open "${rawItemName}" from the current browser view. ` +
+              `I can try searching within this page if you want.`;
+          }
+        } catch (err) {
+          reply = `Open item in browser error: ${err instanceof Error ? err.message : String(err)}`;
+        }
+
+        this.history.push({ role: 'assistant', content: reply });
+        return reply;
+      }
+
       if (!this.currentDirectory) {
         const reply = 'I do not have a current folder context yet. Open or navigate to a folder first.';
         this.history.push({ role: 'assistant', content: reply });
@@ -1464,6 +1686,37 @@ export class Engine {
     }
     // ─────────────────────────────────────────────────────────────────────────
 
+    // ── Confirmation gate — handles yes/no for pending destructive actions ────
+    if (this.pendingConfirmation) {
+      const token = userMessage.trim().toLowerCase();
+
+      if (CONFIRM_WORDS.has(token)) {
+        const { tool, args } = this.pendingConfirmation;
+        this.pendingConfirmation = null;
+        let reply: string;
+        try {
+          reply = await this.executeWithHistory(tool, args);
+        } catch (err) {
+          reply = `Tool error (${tool}): ${err instanceof Error ? err.message : String(err)}`;
+        }
+        this.history.push({ role: 'user',      content: userMessage });
+        this.history.push({ role: 'assistant', content: reply! });
+        return reply!;
+      }
+
+      if (CANCEL_WORDS.has(token)) {
+        this.pendingConfirmation = null;
+        const reply = 'Cancelled — no changes were made.';
+        this.history.push({ role: 'user',      content: userMessage });
+        this.history.push({ role: 'assistant', content: reply });
+        return reply;
+      }
+
+      // User said something else — clear pending and fall through to normal parsing.
+      this.pendingConfirmation = null;
+    }
+    // ──────────────────────────────────────────────────────────────────────
+
     const leetCodeUrl = buildLeetCodeUrlFromPrompt(userMessage);
     if (leetCodeUrl) {
       this.history.push({ role: 'user', content: userMessage });
@@ -1485,16 +1738,30 @@ export class Engine {
     }
 
     // Deterministic Google Docs shortcut: open/create a new untitled doc in browser.
+    // Supports combined prompts like "open google docs and write ..." in one turn.
     if (/\bgoogle\s+docs\b/i.test(userMessage) && /\b(create|new|untitled|open)\b/i.test(userMessage)) {
       this.history.push({ role: 'user', content: userMessage });
       const wantsNewTab = /\bnew\s+tab\b/i.test(userMessage);
+      const writeRequestInSameTurn = extractDocsWriteRequest(userMessage);
       let reply: string;
       try {
-        reply = await this.executeBrowserTool({
+        const openReply = await this.executeBrowserTool({
           action: 'navigate',
           url: 'https://docs.new',
           newTab: wantsNewTab,
         });
+
+        // If the same request also asks to write content, do it immediately.
+        if (writeRequestInSameTurn || /\b(write|type|draft|compose|add|insert)\b/i.test(userMessage)) {
+          const topicLabel = writeRequestInSameTurn?.topic ?? 'Fella and AI productivity';
+          const content = writeRequestInSameTurn?.explicitText ?? await this.generateDocsDraft(topicLabel);
+          await this.executeBrowserTool({ action: 'append_text', text: content, humanLike: true, delayMs: 45 });
+          reply = writeRequestInSameTurn?.explicitText
+            ? `${openReply}\nAdded your text to the new Google Doc.`
+            : `${openReply}\nGenerated and added content about "${topicLabel}" to the new Google Doc.`;
+        } else {
+          reply = openReply;
+        }
       } catch (err) {
         reply = `Open Google Docs error: ${err instanceof Error ? err.message : String(err)}`;
       }
@@ -1515,7 +1782,7 @@ export class Engine {
         const topicLabel = docsWriteRequest?.topic ?? topicFromContext ?? 'Fella and AI productivity';
         const content = docsWriteRequest?.explicitText
           ?? await this.generateDocsDraft(topicLabel);
-        await this.executeBrowserTool({ action: 'append_text', text: content });
+        await this.executeBrowserTool({ action: 'append_text', text: content, humanLike: true, delayMs: 45 });
         reply = docsWriteRequest?.explicitText
           ? 'Added your text to the current Google Docs page in Chrome.'
           : `Generated and added content about "${topicLabel}" to the current Google Docs page in Chrome.`;
@@ -1539,45 +1806,8 @@ export class Engine {
       return reply;
     }
 
-    const wantsSelectAll = /\bselect\s+all\b/i.test(userMessage);
-    const docsFont = extractDocsFontRequest(userMessage);
-    const docsFontSize = extractDocsFontSizeRequest(userMessage);
-    const docsColor = extractDocsColorRequest(userMessage);
-    const wantsHeaderFooter = /\b(?:add|insert)\s+(?:a\s+)?header\s*\/\s*footer\b|\b(?:add|insert)\s+header(?:\s+and\s+footer)?\b|\b(?:add|insert)\s+footer(?:\s+and\s+header)?\b/i.test(userMessage);
-    if (this.browserContextActive && (wantsSelectAll || !!docsFont || !!docsFontSize || !!docsColor || wantsHeaderFooter)) {
-      this.history.push({ role: 'user', content: userMessage });
-      const done: string[] = [];
-      let reply: string;
-      try {
-        if (wantsSelectAll) {
-          await this.executeBrowserTool({ action: 'select_all' });
-          done.push('selected all content');
-        }
-        if (docsFont) {
-          await this.executeBrowserTool({ action: 'set_font', font: docsFont });
-          done.push(`set font to ${docsFont}`);
-        }
-        if (docsFontSize) {
-          await this.executeBrowserTool({ action: 'set_font_size', size: docsFontSize });
-          done.push(`set font size to ${docsFontSize}`);
-        }
-        if (docsColor) {
-          await this.executeBrowserTool({ action: 'set_text_color', color: docsColor });
-          done.push(`changed text color to ${docsColor}`);
-        }
-        if (wantsHeaderFooter) {
-          await this.executeBrowserTool({ action: 'add_header_footer', headerText: 'Header', footerText: 'Footer' });
-          done.push('added header/footer placeholders');
-        }
-        reply = done.length > 0
-          ? `Done: ${done.join(', ')} in the current Google Doc.`
-          : 'I am ready to edit the Google Doc. Tell me exactly what to change.';
-      } catch (err) {
-        reply = `Google Docs edit error: ${err instanceof Error ? err.message : String(err)}`;
-      }
-      this.history.push({ role: 'assistant', content: reply });
-      return reply;
-    }
+    // Legacy Google Docs formatting commands (set_font, set_font_size, etc.) have been removed.
+    // They now fall through to the agenticBrowserTask which autonomously clicks the UI.
 
     const openLeetCodeSolutionsFollowUp = userMessage.trim().match(
       /^(?:open|show|go\s+to|navigate\s+to)\s+(?:the\s+)?solutions?(?:\s+page)?(?:\s+of\s+(?:it|this|that))?(?:\s+in\s+leetcode(?:\.com)?)?(?:\s+in\s+(?:chrome|browser))?$/i,
@@ -1686,7 +1916,7 @@ export class Engine {
         this.pendingOpenClarification = null;
         let reply: string;
         try {
-          reply = await executeTool('screenAutomation', { action: 'launch', app: target });
+          reply = await executeTool('openApplication', { app: target });
         } catch {
           reply = `I couldn't find an application named "${target}" on this system.`;
         }
@@ -1845,6 +2075,30 @@ export class Engine {
         return reply;
       }
 
+      const explicitAppRequest = /\b(app|application|program|exe)\b/i.test(target);
+      if (explicitAppRequest) {
+        const appName = target
+          .replace(/\b(open|launch|start|run)\b/ig, ' ')
+          .replace(/\b(app|application|program|exe)\b/ig, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+
+        if (!appName) {
+          const reply = 'Please tell me the application name to open.';
+          this.history.push({ role: 'assistant', content: reply });
+          return reply;
+        }
+
+        let reply: string;
+        try {
+          reply = await executeTool('openApplication', { app: appName });
+        } catch (err) {
+          reply = `Launch error: ${err instanceof Error ? err.message : String(err)}`;
+        }
+        this.history.push({ role: 'assistant', content: reply });
+        return reply;
+      }
+
       const settingRequest = extractSettingRequest(userMessage);
       if (settingRequest) {
         let reply: string;
@@ -1853,6 +2107,24 @@ export class Engine {
         } catch (err) {
           reply = `Open settings error: ${err instanceof Error ? err.message : String(err)}`;
         }
+        this.history.push({ role: 'assistant', content: reply });
+        return reply;
+      }
+
+      if (isKnownAppTarget(target)) {
+        let reply: string;
+        try {
+          reply = await executeTool('openApplication', { app: target });
+        } catch (err) {
+          reply = `Launch error: ${err instanceof Error ? err.message : String(err)}`;
+        }
+        this.history.push({ role: 'assistant', content: reply });
+        return reply;
+      }
+
+      if (shouldAskOpenKindClarification(target)) {
+        this.pendingOpenClarification = { target };
+        const reply = `Before I open "${target}", is it an application, folder, file/shortcut, or setting?`;
         this.history.push({ role: 'assistant', content: reply });
         return reply;
       }
@@ -1935,7 +2207,7 @@ export class Engine {
 
       if (looksLikeAppTarget(target)) {
         try {
-          const reply = await executeTool('screenAutomation', { action: 'launch', app: target });
+          const reply = await executeTool('openApplication', { app: target });
           this.history.push({ role: 'assistant', content: reply });
           return reply;
         } catch {
@@ -1975,6 +2247,59 @@ export class Engine {
       this.pendingSelection = { kind: 'delete-folder', options: folders };
       const lines = folders.map((f, i) => `${i + 1}. ${f}`);
       const reply = `I found multiple folders named "${folderName}". Which one should I delete?\n${lines.join('\n')}`;
+      this.history.push({ role: 'assistant', content: reply });
+      return reply;
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // ── Keyword bypass — create file directly without going through LLM ──────
+    const createFileInCurrentMatch = userMessage
+      .trim()
+      .match(/^(?:create|make|new)\s+(?:a\s+)?(?:file|text\s+file|txt\s+file)\s+(?:called|named)?\s*(.+?)\s+in\s+(?:it|this|that|here)$/i);
+    if (createFileInCurrentMatch) {
+      this.history.push({ role: 'user', content: userMessage });
+
+      if (!this.currentDirectory) {
+        const reply = 'I do not have a current folder context yet. Open or navigate to a folder first.';
+        this.history.push({ role: 'assistant', content: reply });
+        return reply;
+      }
+
+      const rawName = createFileInCurrentMatch[1]!.trim();
+      const fileName = /\.[a-z0-9]{1,10}$/i.test(rawName) ? rawName : `${rawName}.txt`;
+      const fullPath = join(this.currentDirectory, fileName);
+
+      let reply: string;
+      try {
+        reply = await this.executeWithHistory('createFile', { path: fullPath });
+      } catch (err) {
+        reply = `Create file error: ${err instanceof Error ? err.message : String(err)}`;
+      }
+
+      this.history.push({ role: 'assistant', content: reply });
+      return reply;
+    }
+
+    const createFileMatch = userMessage
+      .trim()
+      .match(
+        /^(?:create|make|new)\s+(?:a\s+)?(?:file|text\s+file|txt\s+file)\s+(?:on|in)\s+(?:the\s+)?([^\s].+?)\s+(?:called|named)?\s*(.+)$/i,
+      );
+    if (createFileMatch) {
+      this.history.push({ role: 'user', content: userMessage });
+
+      const location = createFileMatch[1]!.trim();
+      const rawName = createFileMatch[2]!.trim();
+      const fileName = /\.[a-z0-9]{1,10}$/i.test(rawName) ? rawName : `${rawName}.txt`;
+      const fullPath = join(resolvePath(location), fileName);
+
+      let reply: string;
+      try {
+        reply = await this.executeWithHistory('createFile', { path: fullPath });
+      } catch (err) {
+        reply = `Create file error: ${err instanceof Error ? err.message : String(err)}`;
+      }
+
       this.history.push({ role: 'assistant', content: reply });
       return reply;
     }
@@ -2402,7 +2727,7 @@ export class Engine {
         this.history.push({ role: 'user', content: userMessage });
         let reply: string;
         try {
-          reply = await executeTool('screenAutomation', { action: 'launch', app: appName });
+          reply = await executeTool('openApplication', { app: appName });
         } catch (err) {
           reply = `Launch error: ${err instanceof Error ? err.message : String(err)}`;
         }
@@ -2412,36 +2737,19 @@ export class Engine {
     }
     // ─────────────────────────────────────────────────────────────────────────
 
-    // ── Confirmation gate — handles yes/no for pending destructive actions ────
-    if (this.pendingConfirmation) {
-      const token = userMessage.trim().toLowerCase();
-
-      if (CONFIRM_WORDS.has(token)) {
-        const { tool, args } = this.pendingConfirmation;
-        this.pendingConfirmation = null;
-        let reply: string;
-        try {
-          reply = await this.executeWithHistory(tool, args);
-        } catch (err) {
-          reply = `Tool error (${tool}): ${err instanceof Error ? err.message : String(err)}`;
-        }
-        this.history.push({ role: 'user',      content: userMessage });
-        this.history.push({ role: 'assistant', content: reply! });
-        return reply!;
-      }
-
-      if (CANCEL_WORDS.has(token)) {
-        this.pendingConfirmation = null;
-        const reply = 'Cancelled — no changes were made.';
-        this.history.push({ role: 'user',      content: userMessage });
-        this.history.push({ role: 'assistant', content: reply });
-        return reply;
-      }
-
-      // User said something else — clear pending and fall through to LLM
-      this.pendingConfirmation = null;
+    // ── Ambiguous bare target — ask user what kind of thing it is ───────────
+    // Example: "notepad", "Sachin", "downloads" (without open/launch verbs)
+    const bareTarget = userMessage.trim();
+    const startsWithCommand = /^(?:open|launch|start|run|create|make|new|delete|remove|trash|erase|move|rename|list|show|navigate|go|cd|undo|redo|help|search|find|write|type|send|export|download)\b/i.test(bareTarget);
+    const looksLikeBareName = /^[a-z0-9][a-z0-9 _.-]{0,60}$/i.test(bareTarget) && /[a-z]/i.test(bareTarget);
+    if (!this.pendingConfirmation && !startsWithCommand && looksLikeBareName && shouldAskOpenKindClarification(bareTarget)) {
+      this.history.push({ role: 'user', content: userMessage });
+      this.pendingOpenClarification = { target: bareTarget };
+      const reply = `Do you want me to open "${bareTarget}" as an application, folder, file/shortcut, or setting?`;
+      this.history.push({ role: 'assistant', content: reply });
+      return reply;
     }
-    // ──────────────────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────────
 
     // ── Mock mode (FELLA_MOCK=1) ─────────────────────────────────────────────
     if (MOCK_MODE) {
@@ -2471,6 +2779,7 @@ export class Engine {
     this.pendingConfirmation = null;
     this.pendingSelection = null;
     this.pendingOpenClarification = null;
+    this.pendingContextSwitch = null;
     this.browserContextActive = false;
     this.undoStack.clear();
     this.lastSavedIdx = 0;

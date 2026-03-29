@@ -1,7 +1,7 @@
 {
   "compilerOptions": {
     // File Layout
-    "rootDir": "./src",
+    "rootDir": ".",
     "outDir": "./dist",
 
     // Environment — bundler mode: esbuild handles CJS transform, pkg wraps output
@@ -23,5 +23,5 @@
     "isolatedModules": true,
     "skipLibCheck": true
   },
-  "include": ["src"]
+  "include": ["src", "desktop"]
 }

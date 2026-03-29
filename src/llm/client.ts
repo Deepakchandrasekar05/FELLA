@@ -50,7 +50,8 @@ function parseJsonPayload(content: string): OllamaJsonPayload {
     !('response' in (parsed as object))
   ) {
     const p = parsed as Record<string, unknown>;
-    parsed = { tool: p['action'], args: p['args'] ?? {} };
+    const { action, args, ...rest } = p;
+    parsed = { tool: action, args: args ?? rest };
   }
 
   const result = parsed !== null ? OllamaJsonPayloadSchema.safeParse(parsed) : null;

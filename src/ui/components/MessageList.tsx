@@ -32,9 +32,24 @@ function sanitizeForTuiLabel(label: string): string {
   return label.replace(/C:\\Users\\[^\\)]+/gi, 'C:\\Users');
 }
 
+function sanitizeContent(role: MessageRole, content: string): string {
+  if (role !== 'system') return content;
+  // Filter out accessibility tree noise from system messages
+  const lines = content.split('\n');
+  const filtered = lines.filter(line => {
+    if (/\[ref=e\d+\]/.test(line) && /\b(rowgroup|gridcell|generic|row)\b/i.test(line)) return false;
+    if (/^\s*-\s*$/.test(line)) return false;
+    return true;
+  });
+  const result = filtered.join('\n').trim();
+  // Cap system messages at 300 chars to keep the terminal clean
+  return result.length > 300 ? result.slice(0, 300) + '…' : result;
+}
+
 function MessageItem({ message, assistantLabel }: { message: Message; assistantLabel: string }) {
   const style = ROLE_STYLES[message.role];
   const visibleAssistantLabel = sanitizeForTuiLabel(assistantLabel);
+  const displayContent = sanitizeContent(message.role, message.content);
 
   return (
     <Box flexDirection="row" marginBottom={1} gap={1}>
@@ -54,7 +69,7 @@ function MessageItem({ message, assistantLabel }: { message: Message; assistantL
           </Text>
         )}
         <Text color={style.textColor} wrap="wrap">
-          {message.content}
+          {displayContent}
         </Text>
       </Box>
     </Box>

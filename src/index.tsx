@@ -61,6 +61,33 @@ if (args[0] === 'sessions') {
   process.exit(0);
 }
 
+if (args[0] === 'delete' && args[1] === 'sessions') {
+  const rawId = (args[2] === '--session' || args[2] === '--session_id') ? args[3] : args[2];
+  if (!rawId) {
+    console.error('Usage: fella delete sessions --session <session-id>\n       fella delete sessions <session-id>');
+    process.exit(1);
+  }
+  const store = new MemoryStore();
+  if (!store.sessionExists(rawId)) {
+    console.error(`Session "${rawId}" not found. Run: fella sessions`);
+    process.exit(1);
+  }
+  store.deleteSession(rawId);
+  console.log(`Session "${rawId}" deleted successfully.`);
+  process.exit(0);
+}
+
+if (args[0] === 'uninstall') {
+  console.log('Uninstalling FELLA...');
+  try {
+    execSync('npm uninstall -g fella-cli', { stdio: 'inherit' });
+    console.log('FELLA has been uninstalled successfully.');
+  } catch (err) {
+    console.error('Failed to uninstall FELLA:', err instanceof Error ? err.message : String(err));
+  }
+  process.exit(0);
+}
+
 let resumeSessionId: string | undefined;
 if (args[0] === 'resume') {
   // Accepts both:  fella resume --session_id sess-...  OR  fella resume sess-...

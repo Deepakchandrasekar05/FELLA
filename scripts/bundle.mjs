@@ -57,7 +57,7 @@ await esbuild.build({
   external: externalList,
   alias: aliases,
   banner: {
-    js: "import{createRequire}from'module';const require=createRequire(import.meta.url);",
+    js: "import{createRequire as __customCreateRequire}from'module';const require=__customCreateRequire(import.meta.url);",
   },
   define: defines,
 });

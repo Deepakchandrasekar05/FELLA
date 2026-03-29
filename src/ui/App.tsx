@@ -201,16 +201,38 @@ export default function App({ isAuthenticated, sessionId, onRequestAuth }: Props
         .send(trimmed, (step) => {
           liveStep += 1;
 
-          const argsText = JSON.stringify(step.args ?? {});
-          const resultText =
+          // ── Filter verbose browser logs ──────────────────────────────────
+          // Never show raw accessibility tree data (rowgroup, gridcell, refs)
+          // to the user. Show only clean one-line step summaries.
+          const isBrowserStep = step.tool === 'browserAutomation';
+          const rawResult =
             typeof step.result === 'string'
               ? step.result
               : JSON.stringify(step.result);
 
+          // Detect accessibility tree noise in results
+          const isBrowserVerbose =
+            /\[ref=e\d+\]/.test(rawResult) ||
+            /\browgroup\b/i.test(rawResult) ||
+            /\bgridcell\b/i.test(rawResult) ||
+            rawResult.length > 500;
+
+          let displayContent: string;
+          if (isBrowserStep && isBrowserVerbose) {
+            // For browser steps with verbose output, show only the status
+            displayContent = `Step ${liveStep} — ${step.tool} ${step.success ? '✓' : '✕'}`;
+          } else {
+            // For other steps, show a compact result
+            const truncatedResult = rawResult.length > 200
+              ? rawResult.slice(0, 200) + '…'
+              : rawResult;
+            displayContent = `Step ${liveStep} — ${step.tool} ${step.success ? '✓' : '✕'}\n${truncatedResult}`;
+          }
+
           const stepMessage: Message = {
             id: `${Date.now()}-step-${liveStep}`,
             role: 'system',
-            content: `Step ${liveStep} - ${step.tool} ${argsText} ${step.success ? '✓' : '✕'}\n${resultText}`,
+            content: displayContent,
             timestamp: new Date(),
           };
 
