@@ -3,7 +3,15 @@
   "version": "1.0.8",
   "description": "File Exploration and Local Logic Automation — An AI-powered agentic CLI for Windows",
   "type": "module",
-  "main": "desktop-dist/main.js",
+  "main": "dist/index.js",
+  "files": [
+    "dist/index.js",
+    "dist/package.json",
+    "README.md",
+    "assets/FELLA_CAT.ico",
+    "assets/FELLA_CAT.png",
+    "assets/logo.png"
+  ],
   "bin": {
     "fella": "dist/index.js"
   },
