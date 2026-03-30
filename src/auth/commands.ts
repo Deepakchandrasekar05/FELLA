@@ -230,7 +230,21 @@ export async function logout(): Promise<void> {
     console.log('\n  Already logged out.\n');
     return;
   }
-  await supabase.auth.signOut();
+
+  // Local logout should not require Supabase configuration.
+  const hasSupabaseConfig = Boolean(process.env['SUPABASE_URL'] && process.env['SUPABASE_ANON_KEY']);
+  if (hasSupabaseConfig) {
+    try {
+      await supabase.auth.setSession({
+        access_token: auth.accessToken,
+        refresh_token: auth.refreshToken,
+      });
+      await supabase.auth.signOut();
+    } catch {
+      // Ignore remote sign-out failures; local token removal is authoritative for CLI logout.
+    }
+  }
+
   clearAuthToken();
   console.log(`\n  ✓ Logged out from ${auth.email}\n`);
 }

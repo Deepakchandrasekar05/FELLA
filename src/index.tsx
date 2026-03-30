@@ -1,6 +1,7 @@
 import { resolve, dirname } from 'node:path';
 import { realpathSync }     from 'node:fs';
 import { fileURLToPath }    from 'node:url';
+import { homedir }          from 'node:os';
 import { execSync }         from 'node:child_process';
 import dotenv               from 'dotenv';
 import { render }           from 'ink';
@@ -17,6 +18,7 @@ const realDir = (() => {
 
 const candidates = [
   process.env['FELLA_HOME'] ? resolve(process.env['FELLA_HOME'], '.env') : null,  // set by fella.bat
+  resolve(homedir(), '.fella', '.env'),
   resolve(realDir, '..', '.env'),   // dist/../.env  → D:\fella\.env
   resolve(process.cwd(), '.env'),   // cwd fallback
 ].filter((p): p is string => Boolean(p));

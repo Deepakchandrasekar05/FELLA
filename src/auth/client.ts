@@ -31,6 +31,10 @@ function getClient(): ReturnType<typeof createClient> {
   return _client;
 }
 
+function hasSupabaseConfig(): boolean {
+  return Boolean(process.env['SUPABASE_URL'] && process.env['SUPABASE_ANON_KEY']);
+}
+
 // Proxy so callers can keep using `supabase.auth.xxx` without changes
 export const supabase = new Proxy({} as ReturnType<typeof createClient>, {
   get(_, prop: string | symbol) {
@@ -86,6 +90,12 @@ export async function refreshIfNeeded(): Promise<string | null> {
 
   // Token still valid (> 60 s remaining)
   if (Date.now() < auth.expiresAt - 60_000) return auth.accessToken;
+
+  // Startup should not hard-fail if Supabase is not configured.
+  if (!hasSupabaseConfig()) {
+    clearAuthToken();
+    return null;
+  }
 
   // Attempt a silent refresh
   const { data, error } = await supabase.auth.refreshSession({

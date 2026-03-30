@@ -175,8 +175,9 @@ fella logout
 FELLA reads `.env` from these locations (first match wins):
 
 1. `%FELLA_HOME%\.env`
-2. `<runtime_dir>\..\.env`
-3. `<current_working_directory>\.env`
+2. `%USERPROFILE%\\.fella\\.env`
+3. `<runtime_dir>\..\.env`
+4. `<current_working_directory>\.env`
 
 ### Required keys
 
@@ -191,6 +192,7 @@ What each key is used for:
 - `GROQ_API_KEY`: LLM chat completions via Groq OpenAI-compatible API
 - `SUPABASE_URL`: Supabase project URL for auth
 - `SUPABASE_ANON_KEY`: Supabase public anon key for auth flows
+- Note: `SUPABASE_ANON_KEY` is a publishable client key in this app. If only your Groq key leaked, rotating Groq alone is typically sufficient.
 
 ### Optional keys
 
