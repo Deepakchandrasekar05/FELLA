@@ -436,7 +436,7 @@ Google OAuth uses PKCE and a localhost callback server (port `54321`) to receive
 ### 15.2 Bundling (`scripts/bundle.mjs`)
 
 - Bundles `src/index.tsx` → `dist/index.js` with esbuild
-- Injects build-time env values via `define` (Groq + Supabase)
+- Does not inject secrets; runtime reads env vars from process.env/.env
 - Marks some modules as external (native addons and dynamic-import libraries)
 
 ### 15.3 Packaging prep (`scripts/predist.mjs`)

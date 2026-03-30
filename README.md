@@ -204,8 +204,8 @@ FELLA_HOME=D:\path\to\fella
 
 Notes:
 
-- Build scripts can inject env values into dist bundles during packaging.
-- Runtime env vars still take precedence when present.
+- Secrets are loaded at runtime only; build scripts do not inject API keys into bundles.
+- Never commit `.env` or paste real keys into tracked files.
 
 ---
 

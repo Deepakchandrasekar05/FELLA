@@ -16,19 +16,15 @@ const PLATFORM_LABEL = process.platform === 'win32'
 /**
  * Resolve API key lazily so dotenv-loaded values are available even though
  * this module is imported before src/index.tsx runs dotenv.config().
- *
- * Note: process.env.GROQ_API_KEY may be replaced at build time by esbuild
- * --define during dist builds. Read bracket notation first so a real runtime
- * environment variable can override any bundled fallback value.
  */
 let groqClient: OpenAI | null = null;
 let groqClientKey = '';
 
 function getGroqClient(): OpenAI {
-  const key = process.env['GROQ_API_KEY'] ?? process.env.GROQ_API_KEY ?? '';
+  const key = process.env['GROQ_API_KEY'] ?? '';
   if (!key) {
     throw new OllamaError(
-      'GROQ_API_KEY is missing. Add it to your .env file or rebuild with bundled secrets.',
+      'GROQ_API_KEY is missing. Add it to your runtime environment or .env file.',
     );
   }
 
