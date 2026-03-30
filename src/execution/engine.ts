@@ -266,35 +266,74 @@ function normaliseAppKey(target: string): string {
 }
 
 const KNOWN_APP_KEYS = new Set([
-  // Windows allowlist
+  // Windows allowlist exact keys
   'notepad',
   'explorer',
-  'calculator',
-  'calc',
-  'vscode',
+  'calculator', 'calc',
+  'vscode', 'code',
   'browser',
-  'chrome',
-  'msedge',
-  'edge',
+  'chrome', 'googlechrome',
+  'msedge', 'edge', 'microsoftedge',
   'firefox',
-  'terminal',
-  'paint',
+  'terminal', 'windowsterminal',
+  'paint', 'mspaint',
   'wordpad',
   'powershell',
   'cmd',
-  'excel',
-  'word',
-  'winword',
-  'powerpoint',
-  'outlook',
-  'taskmgr',
-  'regedit',
-  'snipping',
-  // Common aliases
-  'visualstudiocode',
-  'microsoftedge',
-  'googlechrome',
-  'windowsterminal',
+  'excel', 'microsoftexcel',
+  'word', 'winword', 'microsoftword',
+  'powerpoint', 'microsoftpowerpoint',
+  'outlook', 'microsoftoutlook',
+  'taskmgr', 'taskmanager',
+  'regedit', 'registryeditor',
+  'snipping', 'snippingtool',
+  // Common aliases / natural-language names
+  'visualstudiocode', 'visualstudio',
+  'vsstorage',
+  'cursor',
+  'sublime', 'sublimetext',
+  'atom',
+  'notepadplusplus', 'notepad++',
+  'vlc', 'vlcmediaplayer',
+  'winamp',
+  'spotify',
+  'discord',
+  'slack',
+  'zoom',
+  'teams', 'microsoftteams',
+  'skype',
+  'telegram',
+  'whatsapp',
+  'steam',
+  'epicgames', 'epicgameslauncher',
+  'obs', 'obsstudio',
+  'gimp',
+  'inkscape',
+  'blender',
+  'audacity',
+  'handbrake',
+  'winrar', 'sevenzip', '7zip',
+  'acrobat', 'adobeacrobat', 'adobeacrobatreader', 'adobereader',
+  'brave',
+  'opera',
+  'vivaldi',
+  'postman',
+  'insomnia',
+  'docker',
+  'figma',
+  'onenote',
+  'onedrive',
+  'dropbox',
+  'anydesk',
+  'teamviewer',
+  'putty',
+  'filezilla',
+  'winscp',
+  'winpcap',
+  'wireshark',
+  'cpuz', 'gpuz', 'hwinfo',
+  'everything', 'everythingsearch',
+  '7-zip',
 ]);
 
 function isKnownAppTarget(target: string): boolean {
@@ -725,15 +764,10 @@ export class Engine {
   }
 
   private async generateDocsDraft(topic: string): Promise<string> {
-    const prompt = [
-      `Write polished Google Doc content about: ${topic}.`,
-      'Return plain text only.',
-      'Length: 2 concise paragraphs.',
-      'No markdown, no bullet points unless the topic clearly requires a list.',
-    ].join(' ');
-    const out = await this.llmClient.chat([{ role: 'user', content: prompt }]);
-    const generated = typeof out.response === 'string' ? out.response.trim() : '';
-    if (generated) return generated;
+    const prompt = `Write polished content about: ${topic}. Length: 2 concise paragraphs. No markdown, no bullet points unless the topic clearly requires a list.`;
+    const generated = await this.llmClient.generateText(prompt);
+    const trimmed = generated.trim();
+    if (trimmed) return trimmed;
     throw new Error('Could not generate draft content from LLM response.');
   }
 
@@ -1913,6 +1947,20 @@ export class Engine {
       }
 
       if (/\b(app|application|program|exe)\b/i.test(answer)) {
+        this.pendingOpenClarification = null;
+        let reply: string;
+        try {
+          reply = await executeTool('openApplication', { app: target });
+        } catch {
+          reply = `I couldn't find an application named "${target}" on this system.`;
+        }
+        this.history.push({ role: 'assistant', content: reply });
+        return reply;
+      }
+
+      // Affirmative replies (yes / ok / sure) → assume the user wants to
+      // launch the target as an application, which is the most common intent.
+      if (CONFIRM_WORDS.has(answer)) {
         this.pendingOpenClarification = null;
         let reply: string;
         try {

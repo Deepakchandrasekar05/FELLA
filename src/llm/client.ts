@@ -1,6 +1,7 @@
 import type { OllamaJsonPayload, OllamaMessage } from './schema.js';
 import { OllamaJsonPayloadSchema } from './schema.js';
 import { ollamaClient as groqClient } from './ollama.js';
+import OpenAI from 'openai';
 
 const GROQ_MODEL = 'llama-3.3-70b-versatile';
 const OLLAMA_MODEL = 'qwen2.5';
@@ -174,5 +175,76 @@ export class LLMClient {
         `Ollama (${OLLAMA_MODEL}) fallback is unavailable or failed. ` +
         `Please retry in a moment, or run \"ollama pull ${OLLAMA_MODEL}\" if you want local fallback ready.`,
     };
+  }
+
+  /**
+   * Generate plain prose text via Groq WITHOUT json_object enforcement and WITHOUT
+   * the tool-calling system prompt.  Use this for content-generation tasks (e.g.
+   * drafting a Google Doc) where you want natural language, not a JSON payload.
+   *
+   * Falls back to Ollama plain-text if Groq fails.  Returns '' on total failure.
+   */
+  async generateText(prompt: string): Promise<string> {
+    const key = process.env['GROQ_API_KEY'] ?? '';
+    if (key) {
+      try {
+        const client = new OpenAI({
+          apiKey: key,
+          baseURL: 'https://api.groq.com/openai/v1',
+        });
+        const resp = await client.chat.completions.create({
+          model: GROQ_MODEL,
+          messages: [
+            {
+              role: 'system',
+              content:
+                'You are a helpful writing assistant. Write clear, polished prose. ' +
+                'Return plain text only — no markdown, no JSON, no bullet points ' +
+                'unless the topic clearly calls for a list.',
+            },
+            { role: 'user', content: prompt },
+          ],
+          temperature: 0.7,
+          max_tokens: 1024,
+        });
+        const text = resp.choices[0]?.message?.content?.trim() ?? '';
+        if (text) return text;
+      } catch (err) {
+        console.error(
+          `\n  ⚠ Groq plain-text generation failed: ${err instanceof Error ? err.message : String(err)}\n`,
+        );
+      }
+    }
+
+    // Ollama fallback — no JSON format flag so the model replies in prose.
+    if (await isOllamaAvailable()) {
+      try {
+        const response = await fetch(`${OLLAMA_HOST}/api/chat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: OLLAMA_MODEL,
+            stream: false,
+            messages: [
+              { role: 'system', content: 'You are a helpful writing assistant. Return plain text only.' },
+              { role: 'user', content: prompt },
+            ],
+            options: { temperature: 0.7 },
+          }),
+          signal: AbortSignal.timeout(25000),
+        });
+        if (response.ok) {
+          const data = (await response.json()) as { message?: { content?: string } };
+          const text = data.message?.content?.trim() ?? '';
+          if (text) return text;
+        }
+      } catch (err) {
+        console.error(
+          `\n  ⚠ Ollama plain-text generation failed: ${err instanceof Error ? err.message : String(err)}\n`,
+        );
+      }
+    }
+
+    return '';
   }
 }
