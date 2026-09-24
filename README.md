@@ -10,7 +10,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/platform-Windows-blue?style=flat-square"/>
   <img src="https://img.shields.io/badge/version-2.0.0-49b9ff?style=flat-square"/>
-  <img src="https://img.shields.io/badge/UI-React%20%2B%20Ink-green?style=flat-square&logo=react"/>
+  <img src="https://img.shields.io/badge/UI-React%2019%20%2B%20Ink%20(JSX)-61dafb?style=flat-square&logo=react&logoColor=black"/>
   <img src="https://img.shields.io/badge/Runtime-Node.js%20(ESM)-339933?style=flat-square&logo=node.js&logoColor=white"/>
   <img src="https://img.shields.io/badge/Database-SQLite%20(better--sqlite3)-003b57?style=flat-square"/>
 </p>
@@ -96,6 +96,37 @@ bin\fella.bat
 | `fella logout` | Clear saved credentials |
 | `fella whoami` | Show currently signed-in user |
 | `npm test` | Run the comprehensive test suite (45 assertions) |
+
+---
+
+## Project Structure
+
+```text
+FELLA/
+├── bin/
+│   ├── fella.bat               # Windows batch launcher
+│   └── fella.js                # Cross-platform Node launcher (loads tsx & JSX)
+├── cli/                        # React 19 + Ink Terminal UI (JSX)
+│   ├── app.jsx                 # Interactive TUI state and screen management
+│   ├── index.jsx               # CLI entrypoint & argument router
+│   ├── authCommands.js         # Interactive login / signup / OAuth handlers
+│   └── components/
+│       ├── header.jsx          # Gradient ASCII logo and version badges
+│       ├── inputBar.jsx        # Real-time prompt input with key handling
+│       ├── messageList.jsx     # Streaming message thread and spinner
+│       ├── statusBar.jsx       # Shortcuts footer & session indicator
+│       ├── fellaLogo.jsx       # Pixel-art ASCII rendering
+│       └── catArt.js           # Logo pixel data
+└── server/                     # Core Agentic Engine & 14 System Tools
+    ├── agent/                  # System prompts & conversation loop
+    ├── auth/                   # Supabase authentication & token persistence
+    ├── execution/              # Engine, ToolRegistry, and UndoStack
+    ├── llm/                    # Groq client & tool-calling router
+    ├── memory/                 # SQLite turn history & semantic fact store
+    ├── platform/               # Windows native helpers & shell integrations
+    ├── security/               # PathGuard directory sandbox & policies
+    └── tools/                  # 14 agent tools (files, apps, screen, browser)
+```
 
 ---
 
