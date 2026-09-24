@@ -5,6 +5,10 @@
 GUIDE.md
 
 # source
+desktop/
+desktop-dist/
+scripts/
+
 src/
 scripts/
 tsconfig.json

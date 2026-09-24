@@ -1,20 +1,9 @@
 {
-  "name": "fella-cli",
-  "version": "1.0.12",
+  "name": "fella",
+  "version": "2.0.0",
   "description": "File Exploration and Local Logic Automation — An AI-powered agentic CLI for Windows",
   "type": "module",
-  "main": "dist/index.js",
-  "files": [
-    "dist/index.js",
-    "dist/package.json",
-    "README.md",
-    "assets/FELLA_CAT.ico",
-    "assets/FELLA_CAT.png",
-    "assets/logo.png"
-  ],
-  "bin": {
-    "fella": "dist/index.js"
-  },
+  "main": "bin/fella.js",
   "engines": {
     "node": ">=18"
   },
@@ -32,31 +21,23 @@
     "agent",
     "file-manager",
     "terminal",
+    "ink",
+    "react",
     "automation",
     "windows",
     "llm",
     "groq",
-    "ink",
     "natural-language"
   ],
   "author": "Deepakchandrasekar05",
   "license": "ISC",
+  "bin": {
+    "fella": "bin/fella.js"
+  },
   "scripts": {
-    "typecheck": "tsc --noEmit",
-    "bundle": "node scripts/bundle.mjs",
-    "postbundle": "node scripts/postbundle.mjs",
-    "build": "npm run typecheck && npm run bundle && npm run postbundle",
-    "prepublishOnly": "npm run build",
-    "predist": "node scripts/predist.mjs",
-    "sea": "npm run build && node scripts/sea.mjs",
-    "caxa:win": "npm run build && caxa --no-dedupe --input dist --output bin/fella-win.exe -- \"{{caxa}}/node.exe\" \"{{caxa}}/run.cjs\"",
-    "caxa:linux": "npm run build && caxa --input dist --output bin/fella-linux -- \"{{caxa}}/node_modules/.bin/node\" \"{{caxa}}/index.js\"",
-    "caxa:mac": "npm run build && caxa --input dist --output bin/fella-macos -- \"{{caxa}}/node_modules/.bin/node\" \"{{caxa}}/index.js\"",
-    "dist": "taskkill /F /IM fella-win.exe 2>nul & npm run build && npm run predist && caxa --no-dedupe --input dist --output bin/fella-win.exe --stub dist/fella-stub.exe -- \"{{caxa}}/node.exe\" \"{{caxa}}/run.cjs\"",
-    "desktop:build": "node scripts/bundle-desktop.mjs",
-    "desktop:dev": "node scripts/bundle-desktop.mjs && electron desktop-dist/main.js",
-    "desktop:start": "electron desktop-dist/main.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node bin/fella.js",
+    "cli": "node bin/fella.js",
+    "test": "node server/test/test_comprehensive.mjs"
   },
   "dependencies": {
     "@nut-tree-fork/nut-js": "^4.2.6",
@@ -66,7 +47,6 @@
     "chalk": "^5.6.2",
     "chrome-devtools-mcp": "^0.20.3",
     "dotenv": "^17.3.1",
-    "electron-store": "^11.0.2",
     "env-paths": "^4.0.0",
     "execa": "^9.6.1",
     "ink": "^6.8.0",
@@ -74,23 +54,7 @@
     "ink-text-input": "^6.0.0",
     "openai": "^6.27.0",
     "playwright": "^1.55.0",
-    "react": "^19.2.4",
-    "react-dom": "^19.2.4",
     "trash": "^10.1.1",
     "zod": "^4.3.6"
-  },
-  "devDependencies": {
-    "@types/better-sqlite3": "^7.6.13",
-    "@types/node": "^25.3.3",
-    "@types/react": "^19.2.14",
-    "@types/react-dom": "^19.2.3",
-    "canvas": "^3.2.1",
-    "caxa": "^3.0.1",
-    "electron": "^41.0.4",
-    "electron-builder": "^26.8.1",
-    "esbuild": "^0.25.0",
-    "rcedit": "^1.1.2",
-    "tsx": "^4.21.0",
-    "typescript": "^5.9.3"
   }
 }
