@@ -1,9 +1,20 @@
 {
-  "name": "fella",
+  "name": "fella-cli",
   "version": "2.0.0",
   "description": "File Exploration and Local Logic Automation — An AI-powered agentic CLI for Windows",
   "type": "module",
   "main": "bin/fella.js",
+  "bin": {
+    "fella": "bin/fella.js",
+    "fella-cli": "bin/fella.js"
+  },
+  "files": [
+    "bin",
+    "cli",
+    "server",
+    "assets/logo.png",
+    "README.md"
+  ],
   "engines": {
     "node": ">=18"
   },
@@ -30,9 +41,6 @@
     "natural-language"
   ],
   "author": "Deepakchandrasekar05",
-  "bin": {
-    "fella": "bin/fella.js"
-  },
   "scripts": {
     "start": "node --import tsx bin/fella.js",
     "cli": "node --import tsx bin/fella.js",
