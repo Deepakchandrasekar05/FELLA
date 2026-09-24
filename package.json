@@ -30,7 +30,6 @@
     "natural-language"
   ],
   "author": "Deepakchandrasekar05",
-  "license": "ISC",
   "bin": {
     "fella": "bin/fella.js"
   },
