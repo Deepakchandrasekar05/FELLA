@@ -34,8 +34,8 @@
     "fella": "bin/fella.js"
   },
   "scripts": {
-    "start": "node bin/fella.js",
-    "cli": "node bin/fella.js",
+    "start": "node --import tsx bin/fella.js",
+    "cli": "node --import tsx bin/fella.js",
     "test": "node server/test/test_comprehensive.mjs"
   },
   "dependencies": {
@@ -55,6 +55,7 @@
     "playwright": "^1.55.0",
     "react": "^19.2.4",
     "trash": "^10.1.1",
+    "tsx": "^4.23.15",
     "zod": "^4.3.6"
   }
 }

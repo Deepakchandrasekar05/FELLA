@@ -1,12 +1,10 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Box, Text, useApp, useInput } from 'ink';
-import Header from './components/header.js';
-import MessageList from './components/messageList.js';
-import InputBar from './components/inputBar.js';
-import StatusBar from './components/statusBar.js';
+import Header from './components/header.jsx';
+import MessageList from './components/messageList.jsx';
+import InputBar from './components/inputBar.jsx';
+import StatusBar from './components/statusBar.jsx';
 import { Engine } from '../server/execution/engine.js';
-
-const h = React.createElement;
 
 const WELCOME_MESSAGES = [
   {
@@ -243,36 +241,43 @@ export default function App({
     [isThinking, screen, onRequestAuth, exit],
   );
 
-  return h(Box, { flexDirection: 'column' },
-    h(Header, null),
-    screen === 'login'
-      ? h(Box, { flexDirection: 'column' },
-          h(MessageList, { messages, isThinking: false }),
-          h(InputBar, { value: input, onChange: setInput, onSubmit: handleSubmit, isThinking: false }),
-          h(StatusBar, { sessionId: currentSessionId })
-        )
-      : screen === 'welcome'
-      ? h(Box, { flexDirection: 'column', alignItems: 'center', gap: 1, marginTop: 1 },
-          h(Text, { color: '#4CAF50', bold: true }, '✔  Login successful.'),
-          h(Text, { color: '#888888' },
-            'Press ',
-            h(Text, { color: 'white', bold: true }, 'Enter'),
-            ' to continue'
-          )
-        )
-      : h(Box, { flexDirection: 'column' },
-          h(MessageList, {
-            messages,
-            isThinking,
-            assistantLabel,
-          }),
-          h(InputBar, {
-            value: input,
-            onChange: setInput,
-            onSubmit: handleSubmit,
-            isThinking,
-          }),
-          h(StatusBar, { sessionId: currentSessionId })
-        )
+  return (
+    <Box flexDirection="column">
+      <Header />
+      {screen === 'login' ? (
+        <Box flexDirection="column">
+          <MessageList messages={messages} isThinking={false} />
+          <InputBar
+            value={input}
+            onChange={setInput}
+            onSubmit={handleSubmit}
+            isThinking={false}
+          />
+          <StatusBar sessionId={currentSessionId} />
+        </Box>
+      ) : screen === 'welcome' ? (
+        <Box flexDirection="column" alignItems="center" gap={1} marginTop={1}>
+          <Text color="#4CAF50" bold>✔  Login successful.</Text>
+          <Text color="#888888">
+            Press <Text color="white" bold>Enter</Text> to continue
+          </Text>
+        </Box>
+      ) : (
+        <Box flexDirection="column">
+          <MessageList
+            messages={messages}
+            isThinking={isThinking}
+            assistantLabel={assistantLabel}
+          />
+          <InputBar
+            value={input}
+            onChange={setInput}
+            onSubmit={handleSubmit}
+            isThinking={isThinking}
+          />
+          <StatusBar sessionId={currentSessionId} />
+        </Box>
+      )}
+    </Box>
   );
 }

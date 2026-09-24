@@ -1,4 +1,4 @@
-// cli/index.js — FELLA CLI Entry Point
+// cli/index.jsx — FELLA CLI Entry Point
 import React from 'react';
 import { render } from 'ink';
 import { resolve, dirname } from 'node:path';
@@ -6,12 +6,11 @@ import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import dotenv from 'dotenv';
 
-import App from './app.js';
+import App from './app.jsx';
 import { login, logout, signup, loginWithGoogle, whoami } from './authCommands.js';
 import { refreshIfNeeded } from '../server/auth/sessionStore.js';
 import { MemoryStore } from '../server/memory/store.js';
 
-const h = React.createElement;
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // ── Resolve .env ──────────────────────────────────────────────────────────────
@@ -132,19 +131,21 @@ while (true) {
   const token = hasSupabase ? await refreshIfNeeded() : true;
 
   if (token || !hasSupabase) {
-    render(h(App, {
-      isAuthenticated: true,
-      ...(resumeSessionId ? { sessionId: resumeSessionId } : {}),
-    }));
+    render(
+      <App
+        isAuthenticated={true}
+        {...(resumeSessionId ? { sessionId: resumeSessionId } : {})}
+      />
+    );
     break;
   }
 
   let selectedChoice = null;
   const { waitUntilExit } = render(
-    h(App, {
-      isAuthenticated: false,
-      onRequestAuth: (c) => { selectedChoice = c; },
-    })
+    <App
+      isAuthenticated={false}
+      onRequestAuth={(c) => { selectedChoice = c; }}
+    />
   );
   await waitUntilExit();
 
